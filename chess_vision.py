@@ -3,6 +3,8 @@ import numpy as np
 import os
 import glob
 import pickle
+import json
+import datetime
 
 # Add these constants at the top of the file
 SQUARE_SIZE = 22.5  # millimeters
@@ -15,10 +17,36 @@ with open('camera_calibration.pkl', 'rb') as f:
 camera_matrix = calibration_data['camera_matrix']
 dist_coeffs = calibration_data['dist_coeffs']
 
-def find_chessboard_corners(img):
+# Add these as global variables at the top of the file, after imports
+saved_transform = None
+def load_saved_transform():
+    """
+    Load and store the transform data in memory
+    """
+    global saved_transform
+    try:
+        with open('board_transform.json', 'r') as f:
+            data = json.load(f)
+        
+        saved_transform = {
+            'inner_corners': np.array(data['inner_corners'], dtype=np.float32),
+            'board_size': data['board_size'],
+            'square_size': data['square_size'],
+            'rvec': np.array(data['rvec']),
+            'tvec': np.array(data['tvec'])
+        }
+        print("Loaded saved transform from file")
+    except Exception as e:
+        print(f"Error loading transform data: {e}")
+        saved_transform = None
+
+def find_chessboard_corners(img, use_lowest_corner=True):
     """
     Detect chessboard corners using OpenCV's built-in functions.
-    Returns the corners in clockwise order: top-left, top-right, bottom-right, bottom-left
+    Args:
+        img: Input image
+        use_lowest_corner: If True, use the lowest black corner in the image,
+                         if False, use the highest black corner
     """
     # Try finding corners on original image first
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -52,7 +80,14 @@ def find_chessboard_corners(img):
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
     corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
     
-    # Reshape corners into 7x7 grid
+    # Create 3D points for the chessboard pattern
+    pattern_size = (7, 7)
+    objp = np.zeros((np.prod(pattern_size), 3), np.float32)
+    objp[:, :2] = np.indices(pattern_size).T.reshape(-1, 2)
+    square_size = SQUARE_SIZE / 1000.0  # Convert mm to meters
+    objp *= square_size
+    
+    # Find black corner squares and determine orientation
     corner_pts = corners.reshape(7, 7, 2)
     
     def get_square_color(img, corners):
@@ -80,50 +115,87 @@ def find_chessboard_corners(img):
     
     # Check colors of all corner squares
     corner_squares = [
-        # [corners for square], y-coordinate of bottom corner
+        # [corners for square], y-coordinate, x-coordinate
         (np.array([
             corner_pts[-1, 0],     # bottom-left corner
             corner_pts[-1, 1],     # bottom-right corner
             corner_pts[-2, 1],     # top-right corner
             corner_pts[-2, 0]      # top-left corner
-        ]), corner_pts[-1, 0][1]),  # y-coord of bottom-left corner
+        ]), corner_pts[-1, 0][1], corner_pts[-1, 0][0]),  # y and x coords
         
         (np.array([
             corner_pts[-1, -2],    # rotated 90° clockwise
             corner_pts[-1, -1],
             corner_pts[-2, -1],
             corner_pts[-2, -2]
-        ]), corner_pts[-1, -1][1]),
+        ]), corner_pts[-1, -1][1], corner_pts[-1, -1][0]),
         
         (np.array([
             corner_pts[1, -1],     # rotated 180°
             corner_pts[1, -2],
             corner_pts[0, -2],
             corner_pts[0, -1]
-        ]), corner_pts[0, -1][1]),
+        ]), corner_pts[0, -1][1], corner_pts[0, -1][0]),
         
         (np.array([
             corner_pts[1, 0],      # rotated 270°
             corner_pts[1, 1],
             corner_pts[0, 1],
             corner_pts[0, 0]
-        ]), corner_pts[0, 0][1])
+        ]), corner_pts[0, 0][1], corner_pts[0, 0][0])
     ]
     
     # Find black corner squares
     black_corners = []
-    for i, (square_corners, y_coord) in enumerate(corner_squares):
+    for i, (square_corners, y_coord, x_coord) in enumerate(corner_squares):
         color = get_square_color(gray_img, square_corners)
         if color < 128:  # if square is black
-            black_corners.append((i, y_coord))
+            black_corners.append((i, y_coord, x_coord))
     
     if not black_corners:
-        raise ValueError("No black corner squares found!")
+        raise ValueError("No black corners found!")
     
-    # Choose the black corner that's lowest in the image (largest y-coordinate)
-    rotations_needed = black_corners[np.argmax([y for _, y in black_corners])][0]
+    # Choose the black corner based on parameter
+    if use_lowest_corner:
+        # Use bottom-left black corner (highest y, lowest x)
+        rotations_needed = black_corners[np.argmax([y - x/1000 for _, y, x in black_corners])][0]
+    else:
+        # Use top-right black corner (lowest y, highest x)
+        rotations_needed = black_corners[np.argmin([y + x/1000 for _, y, x in black_corners])][0]
     
-    # Rotate the corner_pts array to put the chosen black square at bottom-left
+    # After finding rotations_needed, rotate the object points accordingly
+    objp = objp.reshape(7, 7, 3)
+    objp = np.rot90(objp, k=-rotations_needed)
+    objp = objp.reshape(-1, 3)
+    
+    # Flip y-coordinates to match OpenCV's coordinate system
+    objp[:, 1] = 6 * square_size - objp[:, 1]
+    
+    # Get initial pose
+    ret, rvec, tvec = cv2.solvePnP(objp, corners, camera_matrix, dist_coeffs)
+    
+    # Convert rotation vector to rotation matrix
+    R, _ = cv2.Rodrigues(rvec)
+    
+    # Get the Z axis direction (third column of rotation matrix)
+    z_axis = R[:, 2]
+    
+    # If Z axis is pointing down, flip the pose
+    if z_axis[2] < 0:
+        # Rotate 180 degrees around Y axis to flip Z direction
+        R_flip = np.array([[-1, 0, 0],
+                          [0, 1, 0],
+                          [0, 0, -1]], dtype=np.float32)
+        R = R @ R_flip
+        
+        # Convert back to rotation vector
+        rvec, _ = cv2.Rodrigues(R)
+    
+    # Get final pose with corrected orientation
+    ret, rvec, tvec = cv2.solvePnP(objp, corners, camera_matrix, dist_coeffs, 
+                                  rvec=rvec, tvec=tvec, useExtrinsicGuess=True)
+    
+    # Continue with the rest of the corner processing for the board transform
     corner_pts = np.rot90(corner_pts, k=-rotations_needed)
     
     # Calculate sizes for proper 8x8 board
@@ -146,19 +218,36 @@ def find_chessboard_corners(img):
         cv2.circle(frame_draw, tuple(corner.astype(int)), 5, (0, 0, 255), -1)
     pts = inner_corners.reshape((-1, 1, 2)).astype(np.int32)
     cv2.polylines(frame_draw, [pts], True, (0, 255, 0), 2)
-    cv2.imshow("Detected Corners", frame_draw)
     
-    return inner_corners, board_full_size, square_size
+    return inner_corners, board_full_size, square_size, (rvec, tvec)
 
-def highlight_chess_move(img, move_notation):
+def highlight_chess_move(img, move_notation, use_lowest_corner=True):
     """
     Highlights chess moves on a perspective view of a chess board.
+    Args:
+        img: Input image
+        move_notation: Chess move in algebraic notation
+        use_lowest_corner: If True, use the lowest black corner in the image,
+                         if False, use the highest black corner
     """
+    global saved_transform
+    
     # First undistort the image
     img = cv2.undistort(img, camera_matrix, dist_coeffs)
     
-    # Find chess board corners
-    inner_corners, board_size, square_size = find_chessboard_corners(img)
+    try:
+        # Try to detect the board
+        inner_corners, board_size, square_size, pose = find_chessboard_corners(img, use_lowest_corner)
+        rvec, tvec = pose
+    except Exception as e:
+        # If detection fails, use stored transform
+        if saved_transform is None:
+            raise ValueError("No valid transform available")
+        inner_corners = saved_transform['inner_corners']
+        board_size = saved_transform['board_size']
+        square_size = saved_transform['square_size']
+        rvec = saved_transform['rvec']
+        tvec = saved_transform['tvec']
     
     # Calculate destination points with padding for 8x8 board
     padding = square_size  # One square padding on each side
@@ -176,9 +265,8 @@ def highlight_chess_move(img, move_notation):
     matrix = cv2.getPerspectiveTransform(inner_corners, dst_points_inner)
     inv_matrix = cv2.getPerspectiveTransform(dst_points_inner, inner_corners)
     
-    # Warp the image to get a top-down view (use full board_size for output)
+    # Warp the image to get a top-down view
     warped = cv2.warpPerspective(img, matrix, (board_size, board_size))
-    cv2.imshow("Warped Board", warped)
     
     # Convert move notation to board coordinates
     file_to_col = {'a': 0, 'b': 1, 'c': 2, 'd': 3, 'e': 4, 'f': 5, 'g': 6, 'h': 7}
@@ -204,19 +292,9 @@ def highlight_chess_move(img, move_notation):
                  (end_x + square_size, end_y + square_size),
                  (0, 255, 0), -1)
     
-    # Draw debug grid
-    debug_overlay = overlay.copy()
-    for i in range(9):  # 9 lines for 8 squares
-        x = i * square_size
-        y = i * square_size
-        cv2.line(debug_overlay, (x, 0), (x, board_size), (0, 255, 0), 1)
-        cv2.line(debug_overlay, (0, y), (board_size, y), (0, 255, 0), 1)
-    cv2.imshow("Debug Grid", debug_overlay)
-    
     # Blend the overlay with the warped image
     alpha = 0.3
     highlighted_warped = cv2.addWeighted(overlay, alpha, warped, 1 - alpha, 0)
-    cv2.imshow("Highlighted Warped", highlighted_warped)
     
     # Warp the highlighted image back to the original perspective
     result = cv2.warpPerspective(highlighted_warped, inv_matrix, 
@@ -228,12 +306,36 @@ def highlight_chess_move(img, move_notation):
     final = img.copy()
     final = np.where(mask > 0, result, img)
     
+    # Draw coordinate axes on final image with shorter length
+    axis_length = SQUARE_SIZE / 1000.0  # Convert mm to meters - exactly one square length
+    cv2.drawFrameAxes(final, camera_matrix, dist_coeffs, rvec, tvec, axis_length, 3)
+    
     return final
+
+def save_board_transform(inner_corners, board_size, square_size, pose):
+    """
+    Save the board transform data to a JSON file.
+    """
+    rvec, tvec = pose
+    transform_data = {
+        'inner_corners': inner_corners.tolist(),
+        'board_size': int(board_size),
+        'square_size': int(square_size),
+        'rvec': rvec.tolist(),
+        'tvec': tvec.tolist(),
+        'timestamp': datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    }
+    
+    filename = 'board_transform.json'
+    with open(filename, 'w') as f:
+        json.dump(transform_data, f, indent=4)
+    
+    print(f"Board transform saved to {filename}")
 
 # Example usage with images
 if __name__ == "__main__":
     # Initialize video capture
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(2)
     if not cap.isOpened():
         print("Could not open camera 0, trying camera 1...")
         cap = cv2.VideoCapture(1)
@@ -243,7 +345,12 @@ if __name__ == "__main__":
 
     print("Camera opened successfully! Press 'q' to quit...")
     
+    # Load the saved transform at startup
+    load_saved_transform()
+    
     move = "e2e4"  # Example move
+    
+    use_lowest_corner = True  # Set this to False to use the highest corner
     
     while True:
         ret, frame = cap.read()
@@ -252,20 +359,37 @@ if __name__ == "__main__":
             break
             
         try:
-            result = highlight_chess_move(frame, move)
+            result = highlight_chess_move(frame, move, use_lowest_corner)
             cv2.imshow("Chess Move Highlight", result)
             
-            # Break loop with 'q' key
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-                
-        except Exception as e:
-            cv2.putText(frame, "No chessboard detected", 
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            cv2.imshow("Chess Move Highlight", frame)
+            # Try to detect the board for saving purposes
+            try:
+                inner_corners, board_size, square_size, pose = find_chessboard_corners(frame)
+                latest_corners = inner_corners
+                latest_board_size = board_size
+                latest_square_size = square_size
+            except Exception:
+                pass
             
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        except Exception as e:
+            cv2.putText(frame, "No valid transform available", 
+                      (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.imshow("Chess Move Highlight", frame)
+        
+        # Handle keyboard input
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('c'):
+            use_lowest_corner = not use_lowest_corner
+            print(f"Using {'lowest' if use_lowest_corner else 'highest'} corner")
+        elif key == ord('s'):
+            if latest_corners is not None:
+                save_board_transform(latest_corners, latest_board_size, latest_square_size, pose)
+                # Update the stored transform after saving
+                load_saved_transform()
+            else:
+                print("No valid board detection to save!")
     
     cap.release()
     cv2.destroyAllWindows()
