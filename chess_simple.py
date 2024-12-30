@@ -5,12 +5,12 @@ import cv2
 import numpy as np
 import pickle
 
-# Initialize video capture (try both cameras)
-cap = cv2.VideoCapture(2)
+# Initialize video capture 
+cap = cv2.VideoCapture(0)
 
 
 # Chessboard parameters
-CHESSBOARD_SIZE = (7, 7)
+CHESSBOARD_SIZE = (8, 8)
 SQUARE_SIZE = 22.5 # millimeters
 
 # Termination criteria for corner refinement
@@ -74,16 +74,31 @@ while True:
         # Get the outer corners for the full 8x8 board
         corner_pts = corners2.reshape(7, 7, 2)
         
-        # Calculate the average square size
-        dx = np.mean(np.diff(corner_pts[:, :, 0], axis=1))
-        dy = np.mean(np.diff(corner_pts[:, :, 1], axis=0))
+        # Calculate edge vectors
+        left_edge = corner_pts[-1, 0] - corner_pts[0, 0]
+        right_edge = corner_pts[-1, -1] - corner_pts[0, -1]
+        top_edge = corner_pts[0, -1] - corner_pts[0, 0]
+        bottom_edge = corner_pts[-1, -1] - corner_pts[-1, 0]
         
-        # Calculate outer corners
-        top_left = corner_pts[0, 0] - [dx, dy]
-        top_right = corner_pts[0, -1] + [dx, -dy]
-        bottom_right = corner_pts[-1, -1] + [dx, dy]
-        bottom_left = corner_pts[-1, 0] + [-dx, dy]
+        # Scale vectors with perspective compensation
+        # Near edges (bottom) get a larger scale factor
+        # Far edges (top) get a smaller scale factor
+        perspective_scale = 1.5  # Adjust this value to fine-tune the effect
         
+        left_edge_top = left_edge / (6 * perspective_scale)  # Smaller for far edge
+        left_edge_bottom = left_edge / (6 / perspective_scale)  # Larger for near edge
+        right_edge_top = right_edge / (6 * perspective_scale)
+        right_edge_bottom = right_edge / (6 / perspective_scale)
+        
+        top_edge = top_edge / (6 * perspective_scale)  # Smaller for far edge
+        bottom_edge = bottom_edge / (6 / perspective_scale)  # Larger for near edge
+        
+        # Calculate outer corners using perspective-compensated vectors
+        top_left = corner_pts[0, 0] - top_edge - left_edge_top
+        top_right = corner_pts[0, -1] + top_edge - right_edge_top
+        bottom_right = corner_pts[-1, -1] + bottom_edge + right_edge_bottom
+        bottom_left = corner_pts[-1, 0] - bottom_edge + left_edge_bottom
+
         # Draw outer corners and full board outline
         outer_corners = np.float32([top_left, top_right, bottom_right, bottom_left])
         for corner in outer_corners:

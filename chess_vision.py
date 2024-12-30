@@ -2,32 +2,43 @@ import cv2
 import numpy as np
 import os
 import glob
+import pickle
+
+# Add these constants at the top of the file
+SQUARE_SIZE = 22.5  # millimeters
+CHESSBOARD_SIZE = (7, 7)
+
+# Load camera calibration data
+with open('camera_calibration.pkl', 'rb') as f:
+    calibration_data = pickle.load(f)
+    
+camera_matrix = calibration_data['camera_matrix']
+dist_coeffs = calibration_data['dist_coeffs']
 
 def find_chessboard_corners(img):
     """
     Detect chessboard corners using OpenCV's built-in functions.
     Returns the corners in clockwise order: top-left, top-right, bottom-right, bottom-left
     """
-    # Convert to grayscale
+    # Try finding corners on original image first
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # Invert the image for better detection with dark background
     gray = cv2.bitwise_not(gray)
     
-    # Try findChessboardCorners with more relaxed parameters
     ret, corners = cv2.findChessboardCorners(
         gray, 
-        (7, 7),  # Changed to 7x7 interior points like chess_simple.py
+        (7, 7),
         flags=cv2.CALIB_CB_ADAPTIVE_THRESH +
               cv2.CALIB_CB_NORMALIZE_IMAGE +
               cv2.CALIB_CB_EXHAUSTIVE
     )
     
     if not ret:
-        # Try with histogram equalization if first attempt fails
-        gray_eq = cv2.equalizeHist(gray)
+        # If failed, try with undistorted image
+        undistorted = cv2.undistort(img, camera_matrix, dist_coeffs)
+        gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
+        gray = cv2.bitwise_not(gray)
         ret, corners = cv2.findChessboardCorners(
-            gray_eq, 
+            gray, 
             (7, 7),
             flags=cv2.CALIB_CB_ADAPTIVE_THRESH +
                   cv2.CALIB_CB_NORMALIZE_IMAGE +
@@ -35,41 +46,139 @@ def find_chessboard_corners(img):
         )
     
     if not ret:
-        # Show simple "not found" message instead of debug view
-        cv2.putText(img, "No chessboard detected", 
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        cv2.imshow("Chess Move Highlight", img)
-        cv2.waitKey(1)
         raise ValueError("Could not detect chessboard corners")
     
     # Refine corners
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
     corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
     
-    # Get the outer corners for the full 8x8 board
+    # Reshape corners into 7x7 grid
     corner_pts = corners.reshape(7, 7, 2)
     
-    # Calculate the average square size
-    dx = np.mean(np.diff(corner_pts[:, :, 0], axis=1))
-    dy = np.mean(np.diff(corner_pts[:, :, 1], axis=0))
+    # Function to get average color of a square
+    def get_square_color(img, corners):
+        # Convert corners to integer coordinates
+        corners = corners.astype(np.int32)
+        
+        # Calculate center point of the square
+        center_x = int((corners[0][0] + corners[1][0] + corners[2][0] + corners[3][0]) // 4)
+        center_y = int((corners[0][1] + corners[1][1] + corners[2][1] + corners[3][1]) // 4)
+        
+        # Ensure coordinates are within image bounds
+        height, width = img.shape[:2]
+        center_x = max(2, min(center_x, width-3))
+        center_y = max(2, min(center_y, height-3))
+        
+        # Sample a small region around the center (5x5 pixels)
+        roi = img[center_y-2:center_y+3, center_x-2:center_x+3]
+        
+        # Debug visualization
+        debug_img = img.copy()
+        cv2.circle(debug_img, (center_x, center_y), 3, (0, 0, 255), -1)
+        cv2.imshow("Color Sampling Debug", debug_img)
+        
+        return np.mean(roi)
+
+    # Get the corners for the first square (current bottom-left)
+    square_corners = np.array([
+        corner_pts[-1, 0],     # bottom-left corner
+        corner_pts[-1, 1],     # bottom-right corner
+        corner_pts[-2, 1],     # top-right corner
+        corner_pts[-2, 0]      # top-left corner
+    ])
     
-    # Calculate outer corners
-    top_left = corner_pts[0, 0] - [dx, dy]
-    top_right = corner_pts[0, -1] + [dx, -dy]
-    bottom_right = corner_pts[-1, -1] + [dx, dy]
-    bottom_left = corner_pts[-1, 0] + [-dx, dy]
+    # Convert image to grayscale if it isn't already
+    if len(img.shape) == 3:
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray_img = img
     
-    # Draw outer corners and board outline
-    outer_corners = np.float32([top_left, top_right, bottom_right, bottom_left])
+    # Get color of current bottom-left square
+    current_color = get_square_color(gray_img, square_corners)
+    print(f"Bottom-left square color value: {current_color}")  # Debug print
+    
+    # Determine if we need to rotate based on square color
+    # Note: in grayscale, lower values are darker (black)
+    is_black = current_color < 128  # Assuming middle gray as threshold
+    
+    # Try all four rotations until we get a black square in bottom-left
+    rotations = 0
+    while not is_black and rotations < 4:
+        corner_pts = np.rot90(corner_pts)
+        rotations += 1
+        
+        # Update square corners and check color again
+        square_corners = np.array([
+            corner_pts[-1, 0],
+            corner_pts[-1, 1],
+            corner_pts[-2, 1],
+            corner_pts[-2, 0]
+        ])
+        current_color = get_square_color(gray_img, square_corners)
+        print(f"Rotation {rotations}, color value: {current_color}")  # Debug print
+        is_black = current_color < 128
+    
+    if rotations == 4:
+        print("Warning: Could not determine correct board orientation based on square colors")
+    
+    # Reshape corners back to original format
+    corners = corner_pts.reshape(-1, 1, 2)
+    
+    # Now proceed with the rest of the corner processing
+    board_inner_size = 700
+    square_size = board_inner_size // 7
+    
+    # Define points for the inner board (now guaranteed to be in correct orientation)
+    dst_points_inner = np.array([
+        [0, 0],
+        [board_inner_size, 0],
+        [board_inner_size, board_inner_size],
+        [0, board_inner_size]
+    ], dtype=np.float32)
+    
+    # Get corners of detected inner board (now in correct orientation)
+    inner_corners = np.float32([
+        corner_pts[0, 0],      # top-left
+        corner_pts[0, -1],     # top-right
+        corner_pts[-1, -1],    # bottom-right
+        corner_pts[-1, 0]      # bottom-left
+    ])
+    
+    # Warp the inner board
+    matrix = cv2.getPerspectiveTransform(inner_corners, dst_points_inner)
+    warped = cv2.warpPerspective(img, matrix, (board_inner_size, board_inner_size))
+    
+    # Create a larger image with one square padding on all sides
+    board_full_size = board_inner_size + (2 * square_size)  # Add two squares (one on each side)
+    warped_padded = np.zeros((board_full_size, board_full_size, 3), dtype=np.uint8)
+    
+    # Copy the warped board into the center of the padded image
+    warped_padded[square_size:square_size+board_inner_size, 
+                 square_size:square_size+board_inner_size] = warped
+    
+    # Define the corners for the full board in the warped space
+    outer_corners_warped = np.float32([
+        [0, 0],  # top-left
+        [board_full_size, 0],  # top-right
+        [board_full_size, board_full_size],  # bottom-right
+        [0, board_full_size]  # bottom-left
+    ])
+    
+    # Calculate the inverse transform to go back to the original perspective
+    inv_matrix = cv2.getPerspectiveTransform(outer_corners_warped, inner_corners)
+    
+    # Get the outer corners in the original perspective
+    outer_corners = cv2.perspectiveTransform(
+        outer_corners_warped.reshape(-1, 1, 2), 
+        inv_matrix
+    ).reshape(-1, 2)
+    
+    # Draw debug visualization if needed
     frame_draw = img.copy()
-    
     for corner in outer_corners:
         cv2.circle(frame_draw, tuple(corner.astype(int)), 5, (0, 0, 255), -1)
-    
     pts = outer_corners.reshape((-1, 1, 2)).astype(np.int32)
     cv2.polylines(frame_draw, [pts], True, (0, 255, 0), 2)
-    
-    # Display the corners
     cv2.imshow("Detected Corners", frame_draw)
     cv2.waitKey(1)
     
@@ -86,9 +195,15 @@ def highlight_chess_move(img, move_notation):
     Returns:
         numpy.ndarray: Image with highlighted squares
     """
+    # First undistort the image
+    img = cv2.undistort(img, camera_matrix, dist_coeffs)
+    
     # Find chess board corners
     board_corners = find_chessboard_corners(img)
     print(f"Found board corners: {board_corners}")
+    
+    # Calculate the physical size of the full board in mm
+    board_physical_size = SQUARE_SIZE * 8  # 8 squares * 22.5mm = 180mm
     
     # Define destination points for perspective transform (square board)
     board_size = 800  # pixels
