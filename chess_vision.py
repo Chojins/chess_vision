@@ -55,7 +55,6 @@ def find_chessboard_corners(img):
     # Reshape corners into 7x7 grid
     corner_pts = corners.reshape(7, 7, 2)
     
-    # Function to get average color of a square
     def get_square_color(img, corners):
         # Convert corners to integer coordinates
         corners = corners.astype(np.int32)
@@ -71,72 +70,69 @@ def find_chessboard_corners(img):
         
         # Sample a small region around the center (5x5 pixels)
         roi = img[center_y-2:center_y+3, center_x-2:center_x+3]
-        
-        # Debug visualization
-        debug_img = img.copy()
-        cv2.circle(debug_img, (center_x, center_y), 3, (0, 0, 255), -1)
-        cv2.imshow("Color Sampling Debug", debug_img)
-        
         return np.mean(roi)
 
-    # Get the corners for the first square (current bottom-left)
-    square_corners = np.array([
-        corner_pts[-1, 0],     # bottom-left corner
-        corner_pts[-1, 1],     # bottom-right corner
-        corner_pts[-2, 1],     # top-right corner
-        corner_pts[-2, 0]      # top-left corner
-    ])
-    
     # Convert image to grayscale if it isn't already
     if len(img.shape) == 3:
         gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
         gray_img = img
     
-    # Get color of current bottom-left square
-    current_color = get_square_color(gray_img, square_corners)
-    print(f"Bottom-left square color value: {current_color}")  # Debug print
-    
-    # Determine if we need to rotate based on square color
-    # Note: in grayscale, lower values are darker (black)
-    is_black = current_color < 128  # Assuming middle gray as threshold
-    
-    # Try all four rotations until we get a black square in bottom-left
-    rotations = 0
-    while not is_black and rotations < 4:
-        corner_pts = np.rot90(corner_pts)
-        rotations += 1
+    # Check colors of all corner squares
+    corner_squares = [
+        # [corners for square], y-coordinate of bottom corner
+        (np.array([
+            corner_pts[-1, 0],     # bottom-left corner
+            corner_pts[-1, 1],     # bottom-right corner
+            corner_pts[-2, 1],     # top-right corner
+            corner_pts[-2, 0]      # top-left corner
+        ]), corner_pts[-1, 0][1]),  # y-coord of bottom-left corner
         
-        # Update square corners and check color again
-        square_corners = np.array([
-            corner_pts[-1, 0],
-            corner_pts[-1, 1],
-            corner_pts[-2, 1],
-            corner_pts[-2, 0]
-        ])
-        current_color = get_square_color(gray_img, square_corners)
-        print(f"Rotation {rotations}, color value: {current_color}")  # Debug print
-        is_black = current_color < 128
+        (np.array([
+            corner_pts[-1, -2],    # rotated 90° clockwise
+            corner_pts[-1, -1],
+            corner_pts[-2, -1],
+            corner_pts[-2, -2]
+        ]), corner_pts[-1, -1][1]),
+        
+        (np.array([
+            corner_pts[1, -1],     # rotated 180°
+            corner_pts[1, -2],
+            corner_pts[0, -2],
+            corner_pts[0, -1]
+        ]), corner_pts[0, -1][1]),
+        
+        (np.array([
+            corner_pts[1, 0],      # rotated 270°
+            corner_pts[1, 1],
+            corner_pts[0, 1],
+            corner_pts[0, 0]
+        ]), corner_pts[0, 0][1])
+    ]
     
-    if rotations == 4:
-        print("Warning: Could not determine correct board orientation based on square colors")
+    # Find black corner squares
+    black_corners = []
+    for i, (square_corners, y_coord) in enumerate(corner_squares):
+        color = get_square_color(gray_img, square_corners)
+        if color < 128:  # if square is black
+            black_corners.append((i, y_coord))
     
-    # Reshape corners back to original format
-    corners = corner_pts.reshape(-1, 1, 2)
+    if not black_corners:
+        raise ValueError("No black corner squares found!")
     
-    # Now proceed with the rest of the corner processing
-    board_inner_size = 700
-    square_size = board_inner_size // 7
+    # Choose the black corner that's lowest in the image (largest y-coordinate)
+    rotations_needed = black_corners[np.argmax([y for _, y in black_corners])][0]
     
-    # Define points for the inner board (now guaranteed to be in correct orientation)
-    dst_points_inner = np.array([
-        [0, 0],
-        [board_inner_size, 0],
-        [board_inner_size, board_inner_size],
-        [0, board_inner_size]
-    ], dtype=np.float32)
+    # Rotate the corner_pts array to put the chosen black square at bottom-left
+    corner_pts = np.rot90(corner_pts, k=-rotations_needed)
     
-    # Get corners of detected inner board (now in correct orientation)
+    # Calculate sizes for proper 8x8 board
+    inner_squares = 6  # Number of squares we actually see (6x6)
+    board_inner_size = 600  # Size for the 6x6 inner board
+    square_size = board_inner_size // inner_squares  # Size of each square
+    board_full_size = square_size * 8  # 8 squares total
+    
+    # Get corners of detected inner board
     inner_corners = np.float32([
         corner_pts[0, 0],      # top-left
         corner_pts[0, -1],     # top-right
@@ -144,79 +140,45 @@ def find_chessboard_corners(img):
         corner_pts[-1, 0]      # bottom-left
     ])
     
-    # Warp the inner board
-    matrix = cv2.getPerspectiveTransform(inner_corners, dst_points_inner)
-    warped = cv2.warpPerspective(img, matrix, (board_inner_size, board_inner_size))
-    
-    # Create a larger image with one square padding on all sides
-    board_full_size = board_inner_size + (2 * square_size)  # Add two squares (one on each side)
-    warped_padded = np.zeros((board_full_size, board_full_size, 3), dtype=np.uint8)
-    
-    # Copy the warped board into the center of the padded image
-    warped_padded[square_size:square_size+board_inner_size, 
-                 square_size:square_size+board_inner_size] = warped
-    
-    # Define the corners for the full board in the warped space
-    outer_corners_warped = np.float32([
-        [0, 0],  # top-left
-        [board_full_size, 0],  # top-right
-        [board_full_size, board_full_size],  # bottom-right
-        [0, board_full_size]  # bottom-left
-    ])
-    
-    # Calculate the inverse transform to go back to the original perspective
-    inv_matrix = cv2.getPerspectiveTransform(outer_corners_warped, inner_corners)
-    
-    # Get the outer corners in the original perspective
-    outer_corners = cv2.perspectiveTransform(
-        outer_corners_warped.reshape(-1, 1, 2), 
-        inv_matrix
-    ).reshape(-1, 2)
-    
-    # Draw debug visualization if needed
+    # Draw debug visualization of inner corners
     frame_draw = img.copy()
-    for corner in outer_corners:
+    for corner in inner_corners:
         cv2.circle(frame_draw, tuple(corner.astype(int)), 5, (0, 0, 255), -1)
-    pts = outer_corners.reshape((-1, 1, 2)).astype(np.int32)
+    pts = inner_corners.reshape((-1, 1, 2)).astype(np.int32)
     cv2.polylines(frame_draw, [pts], True, (0, 255, 0), 2)
     cv2.imshow("Detected Corners", frame_draw)
-    cv2.waitKey(1)
     
-    return outer_corners
+    return inner_corners, board_full_size, square_size
 
 def highlight_chess_move(img, move_notation):
     """
     Highlights chess moves on a perspective view of a chess board.
-    
-    Args:
-        img: Input image/frame (numpy array)
-        move_notation (str): Chess move in standard notation (e.g., 'e2e4')
-    
-    Returns:
-        numpy.ndarray: Image with highlighted squares
     """
     # First undistort the image
     img = cv2.undistort(img, camera_matrix, dist_coeffs)
     
     # Find chess board corners
-    board_corners = find_chessboard_corners(img)
-    print(f"Found board corners: {board_corners}")
+    inner_corners, board_size, square_size = find_chessboard_corners(img)
     
-    # Calculate the physical size of the full board in mm
-    board_physical_size = SQUARE_SIZE * 8  # 8 squares * 22.5mm = 180mm
+    # Calculate destination points with padding for 8x8 board
+    padding = square_size  # One square padding on each side
+    inner_board_size = 6 * square_size  # Size of the 6x6 inner board
     
-    # Define destination points for perspective transform (square board)
-    board_size = 800  # pixels
-    dst_points = np.float32([[0, 0], [board_size, 0],
-                            [board_size, board_size], [0, board_size]])
+    # Define points for the inner board (6x6) with padding
+    dst_points_inner = np.float32([
+        [padding, padding],  # top-left with padding
+        [padding + inner_board_size, padding],  # top-right with padding
+        [padding + inner_board_size, padding + inner_board_size],  # bottom-right with padding
+        [padding, padding + inner_board_size]  # bottom-left with padding
+    ])
     
     # Calculate perspective transform matrix
-    matrix = cv2.getPerspectiveTransform(board_corners, dst_points)
-    inv_matrix = cv2.getPerspectiveTransform(dst_points, board_corners)
+    matrix = cv2.getPerspectiveTransform(inner_corners, dst_points_inner)
+    inv_matrix = cv2.getPerspectiveTransform(dst_points_inner, inner_corners)
     
-    # Warp the image to get a top-down view
+    # Warp the image to get a top-down view (use full board_size for output)
     warped = cv2.warpPerspective(img, matrix, (board_size, board_size))
-    cv2.imshow("Warped Board", warped)  # Debug: show warped image
+    cv2.imshow("Warped Board", warped)
     
     # Convert move notation to board coordinates
     file_to_col = {'a': 0, 'b': 1, 'c': 2, 'd': 3, 'e': 4, 'f': 5, 'g': 6, 'h': 7}
@@ -224,10 +186,6 @@ def highlight_chess_move(img, move_notation):
     # Parse move notation
     from_square = (8 - int(move_notation[1]), file_to_col[move_notation[0]])
     to_square = (8 - int(move_notation[3]), file_to_col[move_notation[2]])
-    print(f"Move from {from_square} to {to_square}")
-    
-    # Square size in the warped image
-    square_size = board_size // 8
     
     # Create overlay for highlighting
     overlay = warped.copy()
@@ -238,7 +196,6 @@ def highlight_chess_move(img, move_notation):
     cv2.rectangle(overlay, (start_x, start_y),
                  (start_x + square_size, start_y + square_size),
                  (0, 255, 255), -1)
-    print(f"Drawing source square at ({start_x}, {start_y})")
     
     # Draw destination square (green, semi-transparent)
     end_y = to_square[0] * square_size
@@ -246,12 +203,20 @@ def highlight_chess_move(img, move_notation):
     cv2.rectangle(overlay, (end_x, end_y),
                  (end_x + square_size, end_y + square_size),
                  (0, 255, 0), -1)
-    print(f"Drawing destination square at ({end_x}, {end_y})")
+    
+    # Draw debug grid
+    debug_overlay = overlay.copy()
+    for i in range(9):  # 9 lines for 8 squares
+        x = i * square_size
+        y = i * square_size
+        cv2.line(debug_overlay, (x, 0), (x, board_size), (0, 255, 0), 1)
+        cv2.line(debug_overlay, (0, y), (board_size, y), (0, 255, 0), 1)
+    cv2.imshow("Debug Grid", debug_overlay)
     
     # Blend the overlay with the warped image
     alpha = 0.3
     highlighted_warped = cv2.addWeighted(overlay, alpha, warped, 1 - alpha, 0)
-    cv2.imshow("Highlighted Warped", highlighted_warped)  # Debug: show highlighted warped image
+    cv2.imshow("Highlighted Warped", highlighted_warped)
     
     # Warp the highlighted image back to the original perspective
     result = cv2.warpPerspective(highlighted_warped, inv_matrix, 
@@ -260,10 +225,10 @@ def highlight_chess_move(img, move_notation):
     # Combine the original image with the highlighted overlay
     mask = cv2.warpPerspective(np.ones_like(warped), inv_matrix,
                               (img.shape[1], img.shape[0]))
-    result = img.copy()
-    result = np.where(mask > 0, result, img)
+    final = img.copy()
+    final = np.where(mask > 0, result, img)
     
-    return result
+    return final
 
 # Example usage with images
 if __name__ == "__main__":
