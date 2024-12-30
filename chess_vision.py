@@ -195,6 +195,29 @@ def find_chessboard_corners(img, use_lowest_corner=True):
     ret, rvec, tvec = cv2.solvePnP(objp, corners, camera_matrix, dist_coeffs, 
                                   rvec=rvec, tvec=tvec, useExtrinsicGuess=True)
     
+    # Calculate distance to board origin
+    distance_to_board = np.linalg.norm(tvec)  # Distance in meters
+    distance_mm = distance_to_board * 1000  # Convert to millimeters
+    #print(f"Distance to board: {distance_mm:.1f}mm")
+    
+    # If we're using the lowest corner but distance is too large (or vice versa),
+    # we need to transform to the opposite corner
+    DISTANCE_THRESHOLD = 250  # mm
+    if (use_lowest_corner and distance_mm > DISTANCE_THRESHOLD) or \
+       (not use_lowest_corner and distance_mm <= DISTANCE_THRESHOLD):
+        # Add 6 squares in x and y (convert from mm to meters)
+        square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
+        tvec[0] += 6 * square_size_m  # Add 6 squares in x
+        tvec[1] += 6 * square_size_m  # Add 6 squares in y
+        
+        # Rotate 180 degrees around Z axis
+        R, _ = cv2.Rodrigues(rvec)
+        R_z180 = np.array([[-1, 0, 0],
+                          [0, -1, 0],
+                          [0, 0, 1]], dtype=np.float32)
+        R = R @ R_z180
+        rvec, _ = cv2.Rodrigues(R)
+    
     # Continue with the rest of the corner processing for the board transform
     corner_pts = np.rot90(corner_pts, k=-rotations_needed)
     
@@ -335,7 +358,7 @@ def save_board_transform(inner_corners, board_size, square_size, pose):
 # Example usage with images
 if __name__ == "__main__":
     # Initialize video capture
-    cap = cv2.VideoCapture(2)
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Could not open camera 0, trying camera 1...")
         cap = cv2.VideoCapture(1)
