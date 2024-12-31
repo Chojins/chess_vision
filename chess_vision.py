@@ -205,17 +205,35 @@ def find_chessboard_corners(img, use_lowest_corner=True):
     DISTANCE_THRESHOLD = 250  # mm
     if (use_lowest_corner and distance_mm > DISTANCE_THRESHOLD) or \
        (not use_lowest_corner and distance_mm <= DISTANCE_THRESHOLD):
-        # Add 6 squares in x and y (convert from mm to meters)
+        # Create shift transform (6 squares in x and y)
         square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
-        tvec[0] += 6 * square_size_m  # Add 6 squares in x
-        tvec[1] += 6 * square_size_m  # Add 6 squares in y
+        tvec_shift = np.array([[6 * square_size_m], 
+                             [6 * square_size_m], 
+                             [0]], dtype=np.float32)
         
-        # Rotate 180 degrees around Z axis
-        R, _ = cv2.Rodrigues(rvec)
+        # Create rotation matrix for 180° around Z
         R_z180 = np.array([[-1, 0, 0],
                           [0, -1, 0],
                           [0, 0, 1]], dtype=np.float32)
-        R = R @ R_z180
+        
+        # Create homogeneous transformation matrices
+        # First create original transform
+        R_orig, _ = cv2.Rodrigues(rvec)
+        T_orig = np.eye(4, dtype=np.float32)
+        T_orig[:3, :3] = R_orig
+        T_orig[:3, 3:4] = tvec
+        
+        # Create shift transform
+        T_shift = np.eye(4, dtype=np.float32)
+        T_shift[:3, :3] = R_z180
+        T_shift[:3, 3:4] = tvec_shift
+        
+        # Combine transforms
+        T_final = T_orig @ T_shift
+        
+        # Extract new rotation and translation
+        tvec = T_final[:3, 3:4]
+        R = T_final[:3, :3]
         rvec, _ = cv2.Rodrigues(R)
     
     # Continue with the rest of the corner processing for the board transform
@@ -366,6 +384,11 @@ if __name__ == "__main__":
             print("No cameras available!")
             exit(1)
 
+    # Set camera properties
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    
     print("Camera opened successfully! Press 'q' to quit...")
     
     # Load the saved transform at startup
