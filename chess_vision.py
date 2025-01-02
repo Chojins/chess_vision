@@ -6,7 +6,6 @@ import pickle
 import json
 import datetime
 
-# Add these constants at the top of the file
 SQUARE_SIZE = 22.5  # millimeters
 CHESSBOARD_SIZE = (7, 7)
 
@@ -17,36 +16,51 @@ with open('camera_calibration.pkl', 'rb') as f:
 camera_matrix = calibration_data['camera_matrix']
 dist_coeffs = calibration_data['dist_coeffs']
 
-# Add these as global variables at the top of the file, after imports
+WHITE_SIDE_CAMERA = 0
+BLACK_SIDE_CAMERA = 2
+
 saved_transform = None
+
 def load_saved_transform():
     """
-    Load and store the transform data in memory
+    Load and store the transform data for both cameras
     """
     global saved_transform
     try:
         with open('board_transform.json', 'r') as f:
             data = json.load(f)
         
+        # Now expecting a dict with transforms for both cameras
         saved_transform = {
-            'inner_corners': np.array(data['inner_corners'], dtype=np.float32),
-            'board_size': data['board_size'],
-            'square_size': data['square_size'],
-            'rvec': np.array(data['rvec']),
-            'tvec': np.array(data['tvec'])
+            WHITE_SIDE_CAMERA: {
+                'inner_corners': np.array(data[str(WHITE_SIDE_CAMERA)]['inner_corners'], dtype=np.float32),
+                'board_size': data[str(WHITE_SIDE_CAMERA)]['board_size'],
+                'square_size': data[str(WHITE_SIDE_CAMERA)]['square_size'],
+                'rvec': np.array(data[str(WHITE_SIDE_CAMERA)]['rvec']),
+                'tvec': np.array(data[str(WHITE_SIDE_CAMERA)]['tvec']),
+                'use_white_side': True
+            } if str(WHITE_SIDE_CAMERA) in data else None,
+            BLACK_SIDE_CAMERA: {
+                'inner_corners': np.array(data[str(BLACK_SIDE_CAMERA)]['inner_corners'], dtype=np.float32),
+                'board_size': data[str(BLACK_SIDE_CAMERA)]['board_size'],
+                'square_size': data[str(BLACK_SIDE_CAMERA)]['square_size'],
+                'rvec': np.array(data[str(BLACK_SIDE_CAMERA)]['rvec']),
+                'tvec': np.array(data[str(BLACK_SIDE_CAMERA)]['tvec']),
+                'use_white_side': False
+            } if str(BLACK_SIDE_CAMERA) in data else None
         }
-        print("Loaded saved transform from file")
+        print("Loaded saved transforms from file")
     except Exception as e:
         print(f"Error loading transform data: {e}")
-        saved_transform = None
+        saved_transform = {WHITE_SIDE_CAMERA: None, BLACK_SIDE_CAMERA: None}
 
 def find_chessboard_corners(img, use_lowest_corner=True):
     """
     Detect chessboard corners using OpenCV's built-in functions.
     Args:
         img: Input image
-        use_lowest_corner: If True, use the lowest black corner in the image,
-                         if False, use the highest black corner
+        use_lowest_corner: If True, use the white side in the image,
+                         if False, use the black side
     """
     # Try finding corners on original image first
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -200,8 +214,7 @@ def find_chessboard_corners(img, use_lowest_corner=True):
     distance_mm = distance_to_board * 1000  # Convert to millimeters
     #print(f"Distance to board: {distance_mm:.1f}mm")
     
-    # If we're using the lowest corner but distance is too large (or vice versa),
-    # we need to transform to the opposite corner
+    # If we've fount the incorrect corner, we need to transform to the correct corner
     DISTANCE_THRESHOLD = 250  # mm
     if (use_lowest_corner and distance_mm > DISTANCE_THRESHOLD) or \
        (not use_lowest_corner and distance_mm <= DISTANCE_THRESHOLD):
@@ -268,8 +281,8 @@ def highlight_chess_move(img, move_notation, use_lowest_corner=True):
     Args:
         img: Input image
         move_notation: Chess move in algebraic notation
-        use_lowest_corner: If True, use the lowest black corner in the image,
-                         if False, use the highest black corner
+        use_lowest_corner: If True, use the white side in the image,
+                         if False, use the black side
     """
     global saved_transform
     
@@ -281,14 +294,66 @@ def highlight_chess_move(img, move_notation, use_lowest_corner=True):
         inner_corners, board_size, square_size, pose = find_chessboard_corners(img, use_lowest_corner)
         rvec, tvec = pose
     except Exception as e:
-        # If detection fails, use stored transform
-        if saved_transform is None:
+        # If detection fails, use stored transform for current camera
+        if saved_transform is None or saved_transform[current_camera] is None:
             raise ValueError("No valid transform available")
-        inner_corners = saved_transform['inner_corners']
-        board_size = saved_transform['board_size']
-        square_size = saved_transform['square_size']
-        rvec = saved_transform['rvec']
-        tvec = saved_transform['tvec']
+            
+        # Get transform for current camera
+        camera_transform = saved_transform[current_camera]
+        inner_corners = camera_transform['inner_corners']
+        board_size = camera_transform['board_size']
+        square_size = camera_transform['square_size']
+        rvec = camera_transform['rvec']
+        tvec = camera_transform['tvec']
+        
+        # Check if we need to transform based on distance threshold
+        distance_mm = np.linalg.norm(tvec) * 1000
+        DISTANCE_THRESHOLD = 250  # mm
+        needs_transform = (use_white_side and distance_mm > DISTANCE_THRESHOLD) or \
+                        (not use_white_side and distance_mm <= DISTANCE_THRESHOLD)
+        
+        # Also transform if the saved perspective doesn't match current
+        if needs_transform != (camera_transform['use_white_side'] != use_white_side):
+            # Create shift transform (6 squares in x and y)
+            square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
+            tvec_shift = np.array([[6 * square_size_m], 
+                                [6 * square_size_m], 
+                                [0]], dtype=np.float32)
+            
+            # Create rotation matrix for 180° around Z
+            R_z180 = np.array([[-1, 0, 0],
+                             [0, -1, 0],
+                             [0, 0, 1]], dtype=np.float32)
+            
+            # Create homogeneous transformation matrices
+            R_orig, _ = cv2.Rodrigues(rvec)
+            T_orig = np.eye(4, dtype=np.float32)
+            T_orig[:3, :3] = R_orig
+            T_orig[:3, 3:4] = tvec
+            
+            # Create shift transform
+            T_shift = np.eye(4, dtype=np.float32)
+            T_shift[:3, :3] = R_z180
+            T_shift[:3, 3:4] = tvec_shift
+            
+            # Combine transforms
+            T_final = T_orig @ T_shift
+            
+            # Extract new rotation and translation
+            tvec = T_final[:3, 3:4]
+            R = T_final[:3, :3]
+            rvec, _ = cv2.Rodrigues(R)
+            
+            # Transform the inner corners as well
+            corners_homog = np.ones((4, 3))
+            corners_homog[:, :2] = inner_corners
+            
+            # Apply 180° rotation and translation to corners
+            for i in range(4):
+                corners_homog[i, :2] = board_size - corners_homog[i, :2]
+            
+            # Update inner_corners
+            inner_corners = corners_homog[:, :2]
     
     # Calculate destination points with padding for 8x8 board
     padding = square_size  # One square padding on each side
@@ -353,12 +418,21 @@ def highlight_chess_move(img, move_notation, use_lowest_corner=True):
     
     return final
 
-def save_board_transform(inner_corners, board_size, square_size, pose):
+def save_board_transform(camera_id, inner_corners, board_size, square_size, pose):
     """
-    Save the board transform data to a JSON file.
+    Save the board transform data to a JSON file for both cameras
     """
     rvec, tvec = pose
-    transform_data = {
+    
+    # Load existing transforms if any
+    try:
+        with open('board_transform.json', 'r') as f:
+            transform_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        transform_data = {}
+    
+    # Update transform for current camera
+    transform_data[str(camera_id)] = {
         'inner_corners': inner_corners.tolist(),
         'board_size': int(board_size),
         'square_size': int(square_size),
@@ -367,36 +441,32 @@ def save_board_transform(inner_corners, board_size, square_size, pose):
         'timestamp': datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     }
     
-    filename = 'board_transform.json'
-    with open(filename, 'w') as f:
+    # Save updated transforms
+    with open('board_transform.json', 'w') as f:
         json.dump(transform_data, f, indent=4)
     
-    print(f"Board transform saved to {filename}")
+    print(f"Board transform saved for camera {camera_id}")
 
 # Example usage with images
 if __name__ == "__main__":
-    # Initialize video capture
-    cap = cv2.VideoCapture(0)
+    # Initialize with white side camera
+    current_camera = WHITE_SIDE_CAMERA
+    cap = cv2.VideoCapture(current_camera)
     if not cap.isOpened():
-        print("Could not open camera 0, trying camera 1...")
-        cap = cv2.VideoCapture(1)
-        if not cap.isOpened():
-            print("No cameras available!")
-            exit(1)
+        print(f"Could not open camera {current_camera}!")
+        exit(1)
 
     # Set camera properties
     cap.set(cv2.CAP_PROP_FPS, 30)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
-    print("Camera opened successfully! Press 'q' to quit...")
+    print("Camera opened successfully! Press 'q' to quit, 'c' to switch cameras...")
     
-    # Load the saved transform at startup
+    # Load the saved transforms at startup
     load_saved_transform()
     
     move = "e2e4"  # Example move
-    
-    use_lowest_corner = True  # Set this to False to use the highest corner
     
     while True:
         ret, frame = cap.read()
@@ -405,15 +475,18 @@ if __name__ == "__main__":
             break
             
         try:
-            result = highlight_chess_move(frame, move, use_lowest_corner)
+            # use_white_side should match the current camera
+            use_white_side = (current_camera == WHITE_SIDE_CAMERA)
+            result = highlight_chess_move(frame, move, use_white_side)
             cv2.imshow("Chess Move Highlight", result)
             
             # Try to detect the board for saving purposes
             try:
-                inner_corners, board_size, square_size, pose = find_chessboard_corners(frame)
+                inner_corners, board_size, square_size, pose = find_chessboard_corners(frame, use_white_side)
                 latest_corners = inner_corners
                 latest_board_size = board_size
                 latest_square_size = square_size
+                latest_pose = pose
             except Exception:
                 pass
             
@@ -427,11 +500,32 @@ if __name__ == "__main__":
         if key == ord('q'):
             break
         elif key == ord('c'):
-            use_lowest_corner = not use_lowest_corner
-            print(f"Using {'lowest' if use_lowest_corner else 'highest'} corner")
+            # Switch cameras
+            new_camera = BLACK_SIDE_CAMERA if current_camera == WHITE_SIDE_CAMERA else WHITE_SIDE_CAMERA
+            new_cap = cv2.VideoCapture(new_camera)
+            
+            if new_cap.isOpened():
+                # Close the old camera
+                cap.release()
+                
+                # Set up the new camera
+                cap = new_cap
+                current_camera = new_camera
+                
+                # Set camera properties
+                cap.set(cv2.CAP_PROP_FPS, 30)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                
+                print(f"Switched to {'black' if current_camera == BLACK_SIDE_CAMERA else 'white'} side camera")
+            else:
+                print(f"Failed to open camera {new_camera}")
+                new_cap.release()
+                
         elif key == ord('s'):
             if latest_corners is not None:
-                save_board_transform(latest_corners, latest_board_size, latest_square_size, pose)
+                save_board_transform(current_camera, latest_corners, latest_board_size, 
+                                  latest_square_size, latest_pose)
                 # Update the stored transform after saving
                 load_saved_transform()
             else:
