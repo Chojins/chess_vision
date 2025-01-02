@@ -263,12 +263,7 @@ def find_chessboard_corners(img, use_white_side=True):
     T_orig[:3, 3:4] = tvec
     
     # Create shift transform
-    # Create empty rotation matrix 
-    R_shift = np.array([[1, 0, 0],
-                        [0, 1, 0],
-                        [0, 0, 1]], dtype=np.float32)
     T_shift = np.eye(4, dtype=np.float32)
-    T_shift[:3, :3] = R_shift
     T_shift[:3, 3:4] = tvec_shift
 
     # Combine transforms
