@@ -7,6 +7,7 @@ import json
 import datetime
 
 SQUARE_SIZE = 22.5  # millimeters
+square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
 CHESSBOARD_SIZE = (7, 7)
 
 # Load camera calibration data
@@ -54,13 +55,13 @@ def load_saved_transform():
         print(f"Error loading transform data: {e}")
         saved_transform = {WHITE_SIDE_CAMERA: None, BLACK_SIDE_CAMERA: None}
 
-def find_chessboard_corners(img, use_lowest_corner=True):
+def find_chessboard_corners(img, use_white_side=True):
     """
     Detect chessboard corners using OpenCV's built-in functions.
     Args:
         img: Input image
-        use_lowest_corner: If True, use the white side in the image,
-                         if False, use the black side
+        use_white_side: If True, use the white side camera perspective,
+                       if False, use the black side camera perspective
     """
     # Try finding corners on original image first
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -170,7 +171,7 @@ def find_chessboard_corners(img, use_lowest_corner=True):
         raise ValueError("No black corners found!")
     
     # Choose the black corner based on parameter
-    if use_lowest_corner:
+    if use_white_side:
         # Use bottom-left black corner (highest y, lowest x)
         rotations_needed = black_corners[np.argmax([y - x/1000 for _, y, x in black_corners])][0]
     else:
@@ -208,16 +209,16 @@ def find_chessboard_corners(img, use_lowest_corner=True):
     # Get final pose with corrected orientation
     ret, rvec, tvec = cv2.solvePnP(objp, corners, camera_matrix, dist_coeffs, 
                                   rvec=rvec, tvec=tvec, useExtrinsicGuess=True)
-    
+      
     # Calculate distance to board origin
     distance_to_board = np.linalg.norm(tvec)  # Distance in meters
     distance_mm = distance_to_board * 1000  # Convert to millimeters
     #print(f"Distance to board: {distance_mm:.1f}mm")
     
-    # If we've fount the incorrect corner, we need to transform to the correct corner
+    # If we've found the incorrect corner, we need to transform to the correct corner
     DISTANCE_THRESHOLD = 250  # mm
-    if (use_lowest_corner and distance_mm > DISTANCE_THRESHOLD) or \
-       (not use_lowest_corner and distance_mm <= DISTANCE_THRESHOLD):
+    if (use_white_side and distance_mm > DISTANCE_THRESHOLD) or \
+       (not use_white_side and distance_mm <= DISTANCE_THRESHOLD):
         # Create shift transform (6 squares in x and y)
         square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
         tvec_shift = np.array([[6 * square_size_m], 
@@ -248,6 +249,35 @@ def find_chessboard_corners(img, use_lowest_corner=True):
         tvec = T_final[:3, 3:4]
         R = T_final[:3, :3]
         rvec, _ = cv2.Rodrigues(R)
+
+    # Shift the origin to the outer edge by moving 1 square size in -x and -y
+    tvec_shift = np.array([[-square_size_m], 
+                           [-square_size_m], 
+                           [0]], dtype=np.float32)
+    
+    # Create homogeneous transformation matrices
+    # First create original transform
+    R_orig, _ = cv2.Rodrigues(rvec)
+    T_orig = np.eye(4, dtype=np.float32)
+    T_orig[:3, :3] = R_orig
+    T_orig[:3, 3:4] = tvec
+    
+    # Create shift transform
+    # Create empty rotation matrix 
+    R_shift = np.array([[1, 0, 0],
+                        [0, 1, 0],
+                        [0, 0, 1]], dtype=np.float32)
+    T_shift = np.eye(4, dtype=np.float32)
+    T_shift[:3, :3] = R_shift
+    T_shift[:3, 3:4] = tvec_shift
+
+    # Combine transforms
+    T_final = T_orig @ T_shift
+    
+    # Extract new rotation and translation
+    tvec = T_final[:3, 3:4]
+    R = T_final[:3, :3]
+    rvec, _ = cv2.Rodrigues(R)
     
     # Continue with the rest of the corner processing for the board transform
     corner_pts = np.rot90(corner_pts, k=-rotations_needed)
@@ -275,14 +305,14 @@ def find_chessboard_corners(img, use_lowest_corner=True):
     
     return inner_corners, board_full_size, square_size, (rvec, tvec)
 
-def highlight_chess_move(img, move_notation, use_lowest_corner=True):
+def highlight_chess_move(img, move_notation, use_white_side=True):
     """
     Highlights chess moves on a perspective view of a chess board.
     Args:
         img: Input image
         move_notation: Chess move in algebraic notation
-        use_lowest_corner: If True, use the white side in the image,
-                         if False, use the black side
+        use_white_side: If True, use the white side camera perspective,
+                       if False, use the black side camera perspective
     """
     global saved_transform
     
@@ -291,7 +321,7 @@ def highlight_chess_move(img, move_notation, use_lowest_corner=True):
     
     try:
         # Try to detect the board
-        inner_corners, board_size, square_size, pose = find_chessboard_corners(img, use_lowest_corner)
+        inner_corners, board_size, square_size, pose = find_chessboard_corners(img, use_white_side)
         rvec, tvec = pose
     except Exception as e:
         # If detection fails, use stored transform for current camera
@@ -305,56 +335,7 @@ def highlight_chess_move(img, move_notation, use_lowest_corner=True):
         square_size = camera_transform['square_size']
         rvec = camera_transform['rvec']
         tvec = camera_transform['tvec']
-        
-        # Check if we need to transform based on distance threshold
-        distance_mm = np.linalg.norm(tvec) * 1000
-        DISTANCE_THRESHOLD = 250  # mm
-        needs_transform = (use_white_side and distance_mm > DISTANCE_THRESHOLD) or \
-                        (not use_white_side and distance_mm <= DISTANCE_THRESHOLD)
-        
-        # Also transform if the saved perspective doesn't match current
-        if needs_transform != (camera_transform['use_white_side'] != use_white_side):
-            # Create shift transform (6 squares in x and y)
-            square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
-            tvec_shift = np.array([[6 * square_size_m], 
-                                [6 * square_size_m], 
-                                [0]], dtype=np.float32)
-            
-            # Create rotation matrix for 180° around Z
-            R_z180 = np.array([[-1, 0, 0],
-                             [0, -1, 0],
-                             [0, 0, 1]], dtype=np.float32)
-            
-            # Create homogeneous transformation matrices
-            R_orig, _ = cv2.Rodrigues(rvec)
-            T_orig = np.eye(4, dtype=np.float32)
-            T_orig[:3, :3] = R_orig
-            T_orig[:3, 3:4] = tvec
-            
-            # Create shift transform
-            T_shift = np.eye(4, dtype=np.float32)
-            T_shift[:3, :3] = R_z180
-            T_shift[:3, 3:4] = tvec_shift
-            
-            # Combine transforms
-            T_final = T_orig @ T_shift
-            
-            # Extract new rotation and translation
-            tvec = T_final[:3, 3:4]
-            R = T_final[:3, :3]
-            rvec, _ = cv2.Rodrigues(R)
-            
-            # Transform the inner corners as well
-            corners_homog = np.ones((4, 3))
-            corners_homog[:, :2] = inner_corners
-            
-            # Apply 180° rotation and translation to corners
-            for i in range(4):
-                corners_homog[i, :2] = board_size - corners_homog[i, :2]
-            
-            # Update inner_corners
-            inner_corners = corners_homog[:, :2]
-    
+          
     # Calculate destination points with padding for 8x8 board
     padding = square_size  # One square padding on each side
     inner_board_size = 6 * square_size  # Size of the 6x6 inner board
