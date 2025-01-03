@@ -17,8 +17,8 @@ with open('camera_calibration.pkl', 'rb') as f:
 camera_matrix = calibration_data['camera_matrix']
 dist_coeffs = calibration_data['dist_coeffs']
 
-WHITE_SIDE_CAMERA = 0
-BLACK_SIDE_CAMERA = 2
+WHITE_SIDE_CAMERA = 2
+BLACK_SIDE_CAMERA = 0
 
 saved_transform = None
 
@@ -443,21 +443,26 @@ if __name__ == "__main__":
             use_white_side = (current_camera == WHITE_SIDE_CAMERA)
             
             try:
-                # Try to detect the board
-                inner_corners, board_size, square_size, pose = find_chessboard_corners(frame, use_white_side)
+                # Try to detect the board and store the results
+                latest_corners, latest_board_size, latest_square_size, latest_pose = \
+                    find_chessboard_corners(frame, use_white_side)
+                
+                # Use the latest detection for highlighting
+                result = highlight_chess_move(frame, move, latest_corners, 
+                                           latest_board_size, latest_square_size, latest_pose)
+                
             except Exception as e:
-                # Get transform for current camera
+                # If detection fails, try using saved transform
                 if saved_transform is None or saved_transform[current_camera] is None:
                     raise ValueError("No valid transform available")
                     
                 camera_transform = saved_transform[current_camera]
-                inner_corners = camera_transform['inner_corners']
-                board_size = camera_transform['board_size']
-                square_size = camera_transform['square_size']
-                pose = (camera_transform['rvec'], camera_transform['tvec'])
+                result = highlight_chess_move(frame, move,
+                                           camera_transform['inner_corners'],
+                                           camera_transform['board_size'],
+                                           camera_transform['square_size'],
+                                           (camera_transform['rvec'], camera_transform['tvec']))
             
-            # Pass the transform data directly to highlight_chess_move
-            result = highlight_chess_move(frame, move, inner_corners, board_size, square_size, pose)
             cv2.imshow("Chess Move Highlight", result)
             
         except Exception as e:
@@ -482,6 +487,12 @@ if __name__ == "__main__":
                 cap = new_cap
                 current_camera = new_camera
                 
+                # Reset latest detection
+                latest_corners = None
+                latest_board_size = None
+                latest_square_size = None
+                latest_pose = None
+                
                 # Set camera properties
                 cap.set(cv2.CAP_PROP_FPS, 30)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -498,6 +509,7 @@ if __name__ == "__main__":
                                   latest_square_size, latest_pose)
                 # Update the stored transform after saving
                 load_saved_transform()
+                print(f"Transform saved for camera {current_camera}")
             else:
                 print("No valid board detection to save!")
     

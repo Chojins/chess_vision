@@ -31,7 +31,7 @@ def main():
     # Setup virtual camera first
     setup_virtual_camera()
 
-    # Initialize camera 0
+    # Initialize camera 0 (black side camera)
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Could not open camera 0!")
@@ -61,11 +61,11 @@ def main():
                 break
                 
             try:
-                # Get transform for current camera
-                if chess_vision.saved_transform is None or chess_vision.saved_transform[0] is None:
-                    raise ValueError("No valid transform available")
+                # Get transform for black side camera
+                if chess_vision.saved_transform is None or chess_vision.saved_transform[chess_vision.BLACK_SIDE_CAMERA] is None:
+                    raise ValueError("No valid transform available for black side camera")
                     
-                camera_transform = chess_vision.saved_transform[0]  # Use camera 0's transform
+                camera_transform = chess_vision.saved_transform[chess_vision.BLACK_SIDE_CAMERA]  # Use black side camera's transform
                 inner_corners = camera_transform['inner_corners']
                 board_size = camera_transform['board_size']
                 square_size = camera_transform['square_size']
@@ -83,7 +83,7 @@ def main():
                 
             except Exception as e:
                 # Show error frame
-                cv2.putText(frame, "No valid transform available", 
+                cv2.putText(frame, "No valid transform available for black side camera", 
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 virtual_cam.send(frame_rgb)
