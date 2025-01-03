@@ -58,17 +58,15 @@ def load_saved_transform():
 def find_chessboard_corners(img, use_white_side=True):
     """
     Detect chessboard corners using OpenCV's built-in functions.
-    Args:
-        img: Input image
-        use_white_side: If True, use the white side camera perspective,
-                       if False, use the black side camera perspective
     """
+    square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
+    
     # Try finding corners on original image first
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bitwise_not(gray)
+    gray_inv = cv2.bitwise_not(gray)
     
     ret, corners = cv2.findChessboardCorners(
-        gray, 
+        gray_inv, 
         (7, 7),
         flags=cv2.CALIB_CB_ADAPTIVE_THRESH +
               cv2.CALIB_CB_NORMALIZE_IMAGE +
@@ -79,9 +77,10 @@ def find_chessboard_corners(img, use_white_side=True):
         # If failed, try with undistorted image
         undistorted = cv2.undistort(img, camera_matrix, dist_coeffs)
         gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
-        gray = cv2.bitwise_not(gray)
+        gray_inv = cv2.bitwise_not(gray)
+        
         ret, corners = cv2.findChessboardCorners(
-            gray, 
+            gray_inv, 
             (7, 7),
             flags=cv2.CALIB_CB_ADAPTIVE_THRESH +
                   cv2.CALIB_CB_NORMALIZE_IMAGE +
@@ -99,8 +98,7 @@ def find_chessboard_corners(img, use_white_side=True):
     pattern_size = (7, 7)
     objp = np.zeros((np.prod(pattern_size), 3), np.float32)
     objp[:, :2] = np.indices(pattern_size).T.reshape(-1, 2)
-    square_size = SQUARE_SIZE / 1000.0  # Convert mm to meters
-    objp *= square_size
+    objp *= square_size_m
     
     # Find black corner squares and determine orientation
     corner_pts = corners.reshape(7, 7, 2)
@@ -184,7 +182,7 @@ def find_chessboard_corners(img, use_white_side=True):
     objp = objp.reshape(-1, 3)
     
     # Flip y-coordinates to match OpenCV's coordinate system
-    objp[:, 1] = 6 * square_size - objp[:, 1]
+    objp[:, 1] = 6 * square_size_m - objp[:, 1]
     
     # Get initial pose
     ret, rvec, tvec = cv2.solvePnP(objp, corners, camera_matrix, dist_coeffs)
@@ -300,36 +298,21 @@ def find_chessboard_corners(img, use_white_side=True):
     
     return inner_corners, board_full_size, square_size, (rvec, tvec)
 
-def highlight_chess_move(img, move_notation, use_white_side=True):
+def highlight_chess_move(img, move_notation, inner_corners, board_size, square_size, pose):
     """
     Highlights chess moves on a perspective view of a chess board.
     Args:
         img: Input image
         move_notation: Chess move in algebraic notation
-        use_white_side: If True, use the white side camera perspective,
-                       if False, use the black side camera perspective
+        inner_corners: Corner points of the inner board
+        board_size: Size of the full board
+        square_size: Size of each square
+        pose: Tuple of (rvec, tvec) for board position
     """
-    global saved_transform
-    
     # First undistort the image
     img = cv2.undistort(img, camera_matrix, dist_coeffs)
     
-    try:
-        # Try to detect the board
-        inner_corners, board_size, square_size, pose = find_chessboard_corners(img, use_white_side)
-        rvec, tvec = pose
-    except Exception as e:
-        # If detection fails, use stored transform for current camera
-        if saved_transform is None or saved_transform[current_camera] is None:
-            raise ValueError("No valid transform available")
-            
-        # Get transform for current camera
-        camera_transform = saved_transform[current_camera]
-        inner_corners = camera_transform['inner_corners']
-        board_size = camera_transform['board_size']
-        square_size = camera_transform['square_size']
-        rvec = camera_transform['rvec']
-        tvec = camera_transform['tvec']
+    rvec, tvec = pose
           
     # Calculate destination points with padding for 8x8 board
     padding = square_size  # One square padding on each side
@@ -425,6 +408,12 @@ def save_board_transform(camera_id, inner_corners, board_size, square_size, pose
 
 # Example usage with images
 if __name__ == "__main__":
+    # Initialize variables for storing latest board detection
+    latest_corners = None
+    latest_board_size = None
+    latest_square_size = None
+    latest_pose = None
+
     # Initialize with white side camera
     current_camera = WHITE_SIDE_CAMERA
     cap = cv2.VideoCapture(current_camera)
@@ -451,20 +440,25 @@ if __name__ == "__main__":
             break
             
         try:
-            # use_white_side should match the current camera
             use_white_side = (current_camera == WHITE_SIDE_CAMERA)
-            result = highlight_chess_move(frame, move, use_white_side)
-            cv2.imshow("Chess Move Highlight", result)
             
-            # Try to detect the board for saving purposes
             try:
+                # Try to detect the board
                 inner_corners, board_size, square_size, pose = find_chessboard_corners(frame, use_white_side)
-                latest_corners = inner_corners
-                latest_board_size = board_size
-                latest_square_size = square_size
-                latest_pose = pose
-            except Exception:
-                pass
+            except Exception as e:
+                # Get transform for current camera
+                if saved_transform is None or saved_transform[current_camera] is None:
+                    raise ValueError("No valid transform available")
+                    
+                camera_transform = saved_transform[current_camera]
+                inner_corners = camera_transform['inner_corners']
+                board_size = camera_transform['board_size']
+                square_size = camera_transform['square_size']
+                pose = (camera_transform['rvec'], camera_transform['tvec'])
+            
+            # Pass the transform data directly to highlight_chess_move
+            result = highlight_chess_move(frame, move, inner_corners, board_size, square_size, pose)
+            cv2.imshow("Chess Move Highlight", result)
             
         except Exception as e:
             cv2.putText(frame, "No valid transform available", 
