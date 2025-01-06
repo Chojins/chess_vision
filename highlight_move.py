@@ -94,7 +94,7 @@ def main():
                     move_str = current_move.uci()
                     result = chess_vision.highlight_chess_move(frame, move_str, 
                                                             inner_corners, board_size, 
-                                                            square_size, pose)
+                                                            square_size, pose, show_axes=False)
                 else:
                     result = frame
                 
@@ -102,9 +102,7 @@ def main():
                 result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
                 virtual_cam.send(result_rgb)
                 
-                # Show preview window with current position
-                cv2.putText(result, f"Position: {board.fen().split()[0]}", 
-                          (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                # Show preview window (removed position text)
                 cv2.imshow("Chess Move Highlight", result)
                 
             except Exception as e:

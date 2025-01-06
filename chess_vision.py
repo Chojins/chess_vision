@@ -298,7 +298,7 @@ def find_chessboard_corners(img, use_white_side=True):
     
     return inner_corners, board_full_size, square_size, (rvec, tvec)
 
-def highlight_chess_move(img, move_notation, inner_corners, board_size, square_size, pose):
+def highlight_chess_move(img, move_notation, inner_corners, board_size, square_size, pose, show_axes=False):
     """
     Highlights chess moves on a perspective view of a chess board.
     Args:
@@ -308,6 +308,7 @@ def highlight_chess_move(img, move_notation, inner_corners, board_size, square_s
         board_size: Size of the full board
         square_size: Size of each square
         pose: Tuple of (rvec, tvec) for board position
+        show_axes: Boolean to control axis display (default False)
     """
     # First undistort the image
     img = cv2.undistort(img, camera_matrix, dist_coeffs)
@@ -371,9 +372,10 @@ def highlight_chess_move(img, move_notation, inner_corners, board_size, square_s
     final = img.copy()
     final = np.where(mask > 0, result, img)
     
-    # Draw coordinate axes on final image with shorter length
-    axis_length = SQUARE_SIZE / 1000.0  # Convert mm to meters - exactly one square length
-    cv2.drawFrameAxes(final, camera_matrix, dist_coeffs, rvec, tvec, axis_length, 3)
+    # Draw coordinate axes only if show_axes is True
+    if show_axes:
+        axis_length = SQUARE_SIZE / 1000.0  # Convert mm to meters - exactly one square length
+        cv2.drawFrameAxes(final, camera_matrix, dist_coeffs, rvec, tvec, axis_length, 3)
     
     return final
 
