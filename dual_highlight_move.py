@@ -6,6 +6,8 @@ import numpy as np
 import subprocess
 import chess
 import chess.engine
+import sys
+import argparse
 from pyvirtualcam import PixelFormat
 
 def setup_virtual_cameras():
@@ -52,6 +54,22 @@ def get_next_move(board, engine):
     return result.move
 
 def main():
+    # ----------------------
+    # Parse command-line args
+    # ----------------------
+    parser = argparse.ArgumentParser(
+        description="Highlight chess moves with two vantage cameras (black & white)."
+    )
+    parser.add_argument(
+        "--vantage",
+        choices=["black", "white"],
+        default=None,
+        help="Force highlighting from one vantage (black/white). Omit for normal swapping mode."
+    )
+    args = parser.parse_args()
+
+    forced_vantage = args.vantage  # None => normal swapping
+
     # 1) Setup 2 virtual cameras: /dev/video4 and /dev/video5
     setup_virtual_cameras()
 
@@ -62,16 +80,15 @@ def main():
         return
 
     # 3) Open two physical cameras
-    #    camera 0 = black side vantage
-    #    camera 2 = white side vantage
-    cap_black = cv2.VideoCapture(0)  
-    cap_white = cv2.VideoCapture(2)  
+    #    camera 0 => black vantage
+    #    camera 2 => white vantage
+    cap_black = cv2.VideoCapture(0)
+    cap_white = cv2.VideoCapture(2)
 
     if not cap_black.isOpened():
         print("Could not open camera 0 (black side)!")
         engine.quit()
         return
-
     if not cap_white.isOpened():
         print("Could not open camera 2 (white side)!")
         engine.quit()
@@ -105,110 +122,185 @@ def main():
                              fmt=PixelFormat.RGB, device='/dev/video5') as virtual_cam5:
 
         print(f'Created virtual cameras: {virtual_cam4.device} and {virtual_cam5.device}')
-        print("Press 'q' to quit. Press SPACE for next move. Press 'r' to reset.")
+        if forced_vantage is None:
+            print("MODE: Normal swapping. White moves => black vantage, Black moves => white vantage.")
+        else:
+            print(f"MODE: Fixed vantage = {forced_vantage} camera for all moves.")
+
+        print("Press 'q' to quit. Press SPACE for next move. Press 'r' to reset the board.")
 
         current_move = None
-        # Will store whether the last move was made by White (True) or Black (False).
-        # Initially, there is no last move. We'll keep this as None until space is pressed.
+        # Tracks which color made the last move (True = White, False = Black)
         last_move_was_white = None
 
         while True:
             ret_black, frame_black = cap_black.read()
             ret_white, frame_white = cap_white.read()
-
             if not ret_black or not ret_white:
                 print("Failed to read from black or white camera.")
                 break
 
-            # Decide vantage based on who *made* the last move
-            if current_move is not None and last_move_was_white is not None:
-                # If White just moved => highlight using BLACK vantage
-                if last_move_was_white:
-                    rvec, tvec = black_transform['rvec'], black_transform['tvec']
-                    inner_corners = black_transform['inner_corners']
-                    board_size = black_transform['board_size']
-                    square_size = black_transform['square_size']
-
-                    move_str = current_move.uci()
-                    try:
-                        highlighted_black = chess_vision.highlight_chess_move(
-                            frame_black,
-                            move_str,
-                            inner_corners,
-                            board_size,
-                            square_size,
-                            (rvec, tvec),
-                            show_axes=False
-                        )
-                    except Exception as e:
-                        print(f"Highlight failed on black side: {e}")
-                        highlighted_black = frame_black
-
-                    # Send highlighted black vantage to Virtual Cam 4
-                    out_black_rgb = cv2.cvtColor(highlighted_black, cv2.COLOR_BGR2RGB)
-                    virtual_cam4.send(out_black_rgb)
-                    virtual_cam4.sleep_until_next_frame()
-
-                    # Send the white vantage raw to Virtual Cam 5
-                    out_white_rgb = cv2.cvtColor(frame_white, cv2.COLOR_BGR2RGB)
-                    virtual_cam5.send(out_white_rgb)
-                    virtual_cam5.sleep_until_next_frame()
-
-                    # Preview
-                    cv2.imshow("Black side", highlighted_black)
-                    cv2.imshow("White side", frame_white)
-
-                else:
-                    # Black just moved => highlight using WHITE vantage
-                    rvec, tvec = white_transform['rvec'], white_transform['tvec']
-                    inner_corners = white_transform['inner_corners']
-                    board_size = white_transform['board_size']
-                    square_size = white_transform['square_size']
-
-                    move_str = current_move.uci()
-                    try:
-                        highlighted_white = chess_vision.highlight_chess_move(
-                            frame_white,
-                            move_str,
-                            inner_corners,
-                            board_size,
-                            square_size,
-                            (rvec, tvec),
-                            show_axes=False
-                        )
-                    except Exception as e:
-                        print(f"Highlight failed on white side: {e}")
-                        highlighted_white = frame_white
-
-                    # Send highlighted white vantage to Virtual Cam 5
-                    out_white_rgb = cv2.cvtColor(highlighted_white, cv2.COLOR_BGR2RGB)
-                    virtual_cam5.send(out_white_rgb)
-                    virtual_cam5.sleep_until_next_frame()
-
-                    # Send the black vantage raw to Virtual Cam 4
-                    out_black_rgb = cv2.cvtColor(frame_black, cv2.COLOR_BGR2RGB)
-                    virtual_cam4.send(out_black_rgb)
-                    virtual_cam4.sleep_until_next_frame()
-
-                    # Preview
-                    cv2.imshow("Black side", frame_black)
-                    cv2.imshow("White side", highlighted_white)
-
-            else:
+            if not current_move or last_move_was_white is None:
                 # No move yet => show both cameras raw
-                # Black vantage => Virtual Cam 4
                 out_black_rgb = cv2.cvtColor(frame_black, cv2.COLOR_BGR2RGB)
                 virtual_cam4.send(out_black_rgb)
                 virtual_cam4.sleep_until_next_frame()
 
-                # White vantage => Virtual Cam 5
                 out_white_rgb = cv2.cvtColor(frame_white, cv2.COLOR_BGR2RGB)
                 virtual_cam5.send(out_white_rgb)
                 virtual_cam5.sleep_until_next_frame()
 
-                # Preview
                 cv2.imshow("Black side", frame_black)
                 cv2.imshow("White side", frame_white)
+
+            else:
+                # We have a move to highlight
+                move_str = current_move.uci()
+
+                if forced_vantage is None:
+                    # ---------------------------------------------------
+                    # NORMAL (SWAPPING) MODE
+                    # ---------------------------------------------------
+                    if last_move_was_white:
+                        # White just moved => highlight from black vantage
+                        rvec, tvec = black_transform['rvec'], black_transform['tvec']
+                        inner_corners = black_transform['inner_corners']
+                        board_size = black_transform['board_size']
+                        square_size = black_transform['square_size']
+
+                        try:
+                            highlighted_black = chess_vision.highlight_chess_move(
+                                frame_black,
+                                move_str,
+                                inner_corners,
+                                board_size,
+                                square_size,
+                                (rvec, tvec),
+                                show_axes=False
+                            )
+                        except Exception as e:
+                            print(f"Highlight failed on black side: {e}")
+                            highlighted_black = frame_black
+
+                        # Send highlighted black vantage to /dev/video4
+                        out_black_rgb = cv2.cvtColor(highlighted_black, cv2.COLOR_BGR2RGB)
+                        virtual_cam4.send(out_black_rgb)
+                        virtual_cam4.sleep_until_next_frame()
+
+                        # Send raw white vantage to /dev/video5
+                        out_white_rgb = cv2.cvtColor(frame_white, cv2.COLOR_BGR2RGB)
+                        virtual_cam5.send(out_white_rgb)
+                        virtual_cam5.sleep_until_next_frame()
+
+                        cv2.imshow("Black side", highlighted_black)
+                        cv2.imshow("White side", frame_white)
+
+                    else:
+                        # Black just moved => highlight from white vantage
+                        rvec, tvec = white_transform['rvec'], white_transform['tvec']
+                        inner_corners = white_transform['inner_corners']
+                        board_size = white_transform['board_size']
+                        square_size = white_transform['square_size']
+
+                        try:
+                            highlighted_white = chess_vision.highlight_chess_move(
+                                frame_white,
+                                move_str,
+                                inner_corners,
+                                board_size,
+                                square_size,
+                                (rvec, tvec),
+                                show_axes=False
+                            )
+                        except Exception as e:
+                            print(f"Highlight failed on white side: {e}")
+                            highlighted_white = frame_white
+
+                        # Send highlighted white vantage to /dev/video5
+                        out_white_rgb = cv2.cvtColor(highlighted_white, cv2.COLOR_BGR2RGB)
+                        virtual_cam5.send(out_white_rgb)
+                        virtual_cam5.sleep_until_next_frame()
+
+                        # Send raw black vantage to /dev/video4
+                        out_black_rgb = cv2.cvtColor(frame_black, cv2.COLOR_BGR2RGB)
+                        virtual_cam4.send(out_black_rgb)
+                        virtual_cam4.sleep_until_next_frame()
+
+                        cv2.imshow("Black side", frame_black)
+                        cv2.imshow("White side", highlighted_white)
+
+                else:
+                    # ---------------------------------------------------
+                    # FIXED VANTAGE MODE (forced_vantage = 'black' or 'white')
+                    # ---------------------------------------------------
+                    if forced_vantage == "black":
+                        # Always highlight from black vantage
+                        rvec, tvec = black_transform['rvec'], black_transform['tvec']
+                        inner_corners = black_transform['inner_corners']
+                        board_size = black_transform['board_size']
+                        square_size = black_transform['square_size']
+
+                        try:
+                            highlighted_black = chess_vision.highlight_chess_move(
+                                frame_black,
+                                move_str,
+                                inner_corners,
+                                board_size,
+                                square_size,
+                                (rvec, tvec),
+                                show_axes=False
+                            )
+                        except Exception as e:
+                            print(f"Highlight failed (black vantage): {e}")
+                            highlighted_black = frame_black
+
+                        # Send highlighted black vantage to /dev/video4
+                        out_black_rgb = cv2.cvtColor(highlighted_black, cv2.COLOR_BGR2RGB)
+                        virtual_cam4.send(out_black_rgb)
+                        virtual_cam4.sleep_until_next_frame()
+
+                        # Send raw white vantage to /dev/video5
+                        out_white_rgb = cv2.cvtColor(frame_white, cv2.COLOR_BGR2RGB)
+                        virtual_cam5.send(out_white_rgb)
+                        virtual_cam5.sleep_until_next_frame()
+
+                        cv2.imshow("Black side", highlighted_black)
+                        cv2.imshow("White side", frame_white)
+
+                    else:
+                        # forced_vantage == "white"
+                        # Always highlight from white vantage
+                        rvec, tvec = white_transform['rvec'], white_transform['tvec']
+                        inner_corners = white_transform['inner_corners']
+                        board_size = white_transform['board_size']
+                        square_size = white_transform['square_size']
+
+                        try:
+                            highlighted_white = chess_vision.highlight_chess_move(
+                                frame_white,
+                                move_str,
+                                inner_corners,
+                                board_size,
+                                square_size,
+                                (rvec, tvec),
+                                show_axes=False
+                            )
+                        except Exception as e:
+                            print(f"Highlight failed (white vantage): {e}")
+                            highlighted_white = frame_white
+
+                        # Send highlighted white vantage to /dev/video5
+                        out_white_rgb = cv2.cvtColor(highlighted_white, cv2.COLOR_BGR2RGB)
+                        virtual_cam5.send(out_white_rgb)
+                        virtual_cam5.sleep_until_next_frame()
+
+                        # Send raw black vantage to /dev/video4
+                        out_black_rgb = cv2.cvtColor(frame_black, cv2.COLOR_BGR2RGB)
+                        virtual_cam4.send(out_black_rgb)
+                        virtual_cam4.sleep_until_next_frame()
+
+                        cv2.imshow("Black side", frame_black)
+                        cv2.imshow("White side", highlighted_white)
 
             # Keyboard input
             key = cv2.waitKey(1) & 0xFF
@@ -217,13 +309,9 @@ def main():
             elif key == ord(' '):
                 if not board.is_game_over():
                     # BEFORE pushing the move, note who is about to move
-                    # True if White is about to move, else False
-                    last_move_was_white = board.turn
-
-                    # Engine picks next move
+                    last_move_was_white = board.turn  # True if White's turn
                     next_move = get_next_move(board, engine)
                     print(f"Engine move: {next_move.uci()}")
-
                     board.push(next_move)
                     current_move = next_move
                 else:
@@ -235,11 +323,11 @@ def main():
                 last_move_was_white = None
                 print("Board reset.")
 
-    # Cleanup
-    cap_black.release()
-    cap_white.release()
-    cv2.destroyAllWindows()
-    engine.quit()
+        # Cleanup
+        cap_black.release()
+        cap_white.release()
+        cv2.destroyAllWindows()
+        engine.quit()
 
 if __name__ == "__main__":
     main()
