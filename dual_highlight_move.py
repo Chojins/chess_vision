@@ -9,30 +9,75 @@ import chess.engine
 import sys
 import argparse
 from pyvirtualcam import PixelFormat
+import os
+
+# --------------------------
+# 1) Mask-based Flip Helpers
+# --------------------------
+def load_flip_mask(mask_path: str, width: int, height: int) -> np.ndarray:
+    """
+    Loads a black & white mask, converts it to 0-1 float, and
+    ensures it matches the (width x height).
+    Returns a 3-channel float mask in shape (H x W x 3).
+    """
+    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise RuntimeError(f"Error: Could not read mask at {mask_path}")
+
+    # Resize mask if needed
+    if (mask.shape[1] != width) or (mask.shape[0] != height):
+        mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+
+    mask_float = mask.astype(np.float32) / 255.0
+    # Expand to 3 channels
+    mask_float_3d = np.dstack([mask_float]*3)
+    return mask_float_3d
+
+def flip_frame_with_mask(frame: np.ndarray, mask_float_3d: np.ndarray) -> np.ndarray:
+    """
+    Flip only the portion of 'frame' where mask_float_3d == 1.
+    """
+    # Flip the entire frame horizontally
+    flipped_frame = cv2.flip(frame, 1)
+
+    # The “mirror-only” portion (where mask = 1)
+    mirror_only_flipped = flipped_frame * mask_float_3d
+
+    # The “non-mirror” portion (where mask = 0)
+    non_flipped_region = frame * (1.0 - mask_float_3d)
+
+    # Combine them
+    combined = mirror_only_flipped + non_flipped_region
+    combined_uint8 = combined.astype(np.uint8)
+
+    return combined_uint8
+
 
 def setup_virtual_cameras():
     """
-    Creates two virtual cameras: /dev/video4 and /dev/video5.
-    Adjust the parameters below if your system needs different device IDs.
+    Creates FOUR virtual cameras:
+        • /dev/video4  (black - LeRobot)
+        • /dev/video5  (white - LeRobot)
+        • /dev/video6  (black - OBS)
+        • /dev/video7  (white - OBS)
     """
-    print("Setting up 2 virtual cameras (4 and 5)...")
-    # Remove any existing v4l2loopback
-    subprocess.run(['sudo', 'modprobe', '-r', 'v4l2loopback'], capture_output=True)
+    print("Setting up 4 virtual cameras (4-7)…")
+    subprocess.run(['sudo', 'modprobe', '-r', 'v4l2loopback'], check=True)
     time.sleep(1)
 
-    # Create 2 virtual devices: /dev/video4 and /dev/video5
     subprocess.run([
         'sudo', 'modprobe', 'v4l2loopback',
-        'devices=2',
-        'video_nr=4,5',
-        'card_label="Virtual Chess Cam 4","Virtual Chess Cam 5"',
-        'exclusive_caps=1'
-    ])
+        'devices=4',
+        'video_nr=4,5,6,7',
+        ('card_label="SO100 Black","SO100 White",'
+         '"OBS Black","OBS White"'),
+        'yuv420=1',
+        'exclusive_caps=0'          # readers & writers can coexist
+    ], check=True)
     time.sleep(1)
 
-    # Permissions so non-root can write to them
-    subprocess.run(['sudo', 'chmod', '666', '/dev/video4'])
-    subprocess.run(['sudo', 'chmod', '666', '/dev/video5'])
+    for dev in ('/dev/video4','/dev/video5','/dev/video6','/dev/video7'):
+        subprocess.run(['sudo', 'chmod', '666', dev], check=True)
 
     print("Virtual camera setup complete!")
 
@@ -66,9 +111,17 @@ def main():
         default=None,
         help="Force highlighting from one vantage (black/white). Omit for normal swapping mode."
     )
+    parser.add_argument(
+        "--flip_mask",
+        type=str,
+        default=None,
+        help="Path to a black-and-white mask image (white=flip, black=keep). "
+             "If provided, frames are flipped after highlighting."
+    )
     args = parser.parse_args()
 
     forced_vantage = args.vantage  # None => normal swapping
+    flip_mask_path = args.flip_mask
 
     # 1) Setup 2 virtual cameras: /dev/video4 and /dev/video5
     setup_virtual_cameras()
@@ -115,13 +168,29 @@ def main():
         engine.quit()
         return
 
-    # 5) Prepare two virtual cameras: /dev/video4 and /dev/video5
-    with pyvirtualcam.Camera(width=640, height=480, fps=30,
-                             fmt=PixelFormat.RGB, device='/dev/video4') as virtual_cam4, \
-         pyvirtualcam.Camera(width=640, height=480, fps=30,
-                             fmt=PixelFormat.RGB, device='/dev/video5') as virtual_cam5:
+    # 5) (Optional) Load flip mask if provided
+    mask_float_3d = None
+    if flip_mask_path is not None and os.path.isfile(flip_mask_path):
+        try:
+            # We'll assume both cameras are 640×480, so:
+            mask_float_3d = load_flip_mask(flip_mask_path, 640, 480)
+            print(f"Loaded flip mask from {flip_mask_path}")
+        except Exception as e:
+            print(f"Failed to load/resize flip mask: {e}")
 
-        print(f'Created virtual cameras: {virtual_cam4.device} and {virtual_cam5.device}')
+    # 6) Prepare two virtual cameras: /dev/video4 and /dev/video5
+    with pyvirtualcam.Camera(640, 480, 30, fmt=PixelFormat.RGB,
+                         device='/dev/video4') as v_cam4, \
+        pyvirtualcam.Camera(640, 480, 30, fmt=PixelFormat.RGB,
+                         device='/dev/video5') as v_cam5, \
+        pyvirtualcam.Camera(640, 480, 30, fmt=PixelFormat.RGB,
+                         device='/dev/video6') as v_cam6, \
+        pyvirtualcam.Camera(640, 480, 30, fmt=PixelFormat.RGB,
+                         device='/dev/video7') as v_cam7:
+
+        print(f'LeRobot cams  : {v_cam4.device}, {v_cam5.device}')
+        print(f'OBS cams      : {v_cam6.device}, {v_cam7.device}')
+
         if forced_vantage is None:
             print("MODE: Normal swapping. White moves => black vantage, Black moves => white vantage.")
         else:
@@ -140,19 +209,13 @@ def main():
                 print("Failed to read from black or white camera.")
                 break
 
+            # We'll define default frames to display
+            final_black_frame = frame_black
+            final_white_frame = frame_white
+
             if not current_move or last_move_was_white is None:
-                # No move yet => show both cameras raw
-                out_black_rgb = cv2.cvtColor(frame_black, cv2.COLOR_BGR2RGB)
-                virtual_cam4.send(out_black_rgb)
-                virtual_cam4.sleep_until_next_frame()
-
-                out_white_rgb = cv2.cvtColor(frame_white, cv2.COLOR_BGR2RGB)
-                virtual_cam5.send(out_white_rgb)
-                virtual_cam5.sleep_until_next_frame()
-
-                cv2.imshow("Black side", frame_black)
-                cv2.imshow("White side", frame_white)
-
+                # No move yet => no highlight
+                pass
             else:
                 # We have a move to highlight
                 move_str = current_move.uci()
@@ -182,18 +245,7 @@ def main():
                             print(f"Highlight failed on black side: {e}")
                             highlighted_black = frame_black
 
-                        # Send highlighted black vantage to /dev/video4
-                        out_black_rgb = cv2.cvtColor(highlighted_black, cv2.COLOR_BGR2RGB)
-                        virtual_cam4.send(out_black_rgb)
-                        virtual_cam4.sleep_until_next_frame()
-
-                        # Send raw white vantage to /dev/video5
-                        out_white_rgb = cv2.cvtColor(frame_white, cv2.COLOR_BGR2RGB)
-                        virtual_cam5.send(out_white_rgb)
-                        virtual_cam5.sleep_until_next_frame()
-
-                        cv2.imshow("Black side", highlighted_black)
-                        cv2.imshow("White side", frame_white)
+                        final_black_frame = highlighted_black  # final for black vantage
 
                     else:
                         # Black just moved => highlight from white vantage
@@ -216,18 +268,7 @@ def main():
                             print(f"Highlight failed on white side: {e}")
                             highlighted_white = frame_white
 
-                        # Send highlighted white vantage to /dev/video5
-                        out_white_rgb = cv2.cvtColor(highlighted_white, cv2.COLOR_BGR2RGB)
-                        virtual_cam5.send(out_white_rgb)
-                        virtual_cam5.sleep_until_next_frame()
-
-                        # Send raw black vantage to /dev/video4
-                        out_black_rgb = cv2.cvtColor(frame_black, cv2.COLOR_BGR2RGB)
-                        virtual_cam4.send(out_black_rgb)
-                        virtual_cam4.sleep_until_next_frame()
-
-                        cv2.imshow("Black side", frame_black)
-                        cv2.imshow("White side", highlighted_white)
+                        final_white_frame = highlighted_white
 
                 else:
                     # ---------------------------------------------------
@@ -254,18 +295,7 @@ def main():
                             print(f"Highlight failed (black vantage): {e}")
                             highlighted_black = frame_black
 
-                        # Send highlighted black vantage to /dev/video4
-                        out_black_rgb = cv2.cvtColor(highlighted_black, cv2.COLOR_BGR2RGB)
-                        virtual_cam4.send(out_black_rgb)
-                        virtual_cam4.sleep_until_next_frame()
-
-                        # Send raw white vantage to /dev/video5
-                        out_white_rgb = cv2.cvtColor(frame_white, cv2.COLOR_BGR2RGB)
-                        virtual_cam5.send(out_white_rgb)
-                        virtual_cam5.sleep_until_next_frame()
-
-                        cv2.imshow("Black side", highlighted_black)
-                        cv2.imshow("White side", frame_white)
+                        final_black_frame = highlighted_black
 
                     else:
                         # forced_vantage == "white"
@@ -289,18 +319,31 @@ def main():
                             print(f"Highlight failed (white vantage): {e}")
                             highlighted_white = frame_white
 
-                        # Send highlighted white vantage to /dev/video5
-                        out_white_rgb = cv2.cvtColor(highlighted_white, cv2.COLOR_BGR2RGB)
-                        virtual_cam5.send(out_white_rgb)
-                        virtual_cam5.sleep_until_next_frame()
+                        final_white_frame = highlighted_white
 
-                        # Send raw black vantage to /dev/video4
-                        out_black_rgb = cv2.cvtColor(frame_black, cv2.COLOR_BGR2RGB)
-                        virtual_cam4.send(out_black_rgb)
-                        virtual_cam4.sleep_until_next_frame()
+            # -------------------------------------------------
+            # LAST STEP: Flip via mask if flip_mask_path is set
+            # -------------------------------------------------
+            if mask_float_3d is not None:
+                final_black_frame = flip_frame_with_mask(final_black_frame, mask_float_3d)
+                final_white_frame = flip_frame_with_mask(final_white_frame, mask_float_3d)
 
-                        cv2.imshow("Black side", frame_black)
-                        cv2.imshow("White side", highlighted_white)
+            # Convert to RGB & send to virtual cams
+            out_black_rgb = cv2.cvtColor(final_black_frame, cv2.COLOR_BGR2RGB)
+            out_white_rgb = cv2.cvtColor(final_white_frame, cv2.COLOR_BGR2RGB)
+
+            v_cam4.send(out_black_rgb)   # LeRobot black
+            v_cam6.send(out_black_rgb)   # OBS     black
+
+            v_cam5.send(out_white_rgb)   # LeRobot white
+            v_cam7.send(out_white_rgb)   # OBS     white
+
+            # pace the loop once (last cam)
+            v_cam7.sleep_until_next_frame()
+
+            # Show windows
+            cv2.imshow("Black side", final_black_frame)
+            cv2.imshow("White side", final_white_frame)
 
             # Keyboard input
             key = cv2.waitKey(1) & 0xFF
