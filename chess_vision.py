@@ -5,6 +5,9 @@ import glob
 import pickle
 import json
 import datetime
+import chess
+import pyrender
+import trimesh
 
 SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
@@ -298,9 +301,20 @@ def find_chessboard_corners(img, use_white_side=True):
     
     return inner_corners, board_full_size, square_size, (rvec, tvec)
 
-def highlight_chess_move(img, move_notation, inner_corners, board_size, square_size, pose, show_axes=False):
+def highlight_chess_move(
+    img,
+    move_notation,
+    inner_corners,
+    board_size,
+    square_size,
+    pose,
+    show_axes=False,
+    board=None,
+    piece_models=None,
+):
     """
     Highlights chess moves on a perspective view of a chess board.
+
     Args:
         img: Input image
         move_notation: Chess move in algebraic notation
@@ -309,6 +323,11 @@ def highlight_chess_move(img, move_notation, inner_corners, board_size, square_s
         square_size: Size of each square
         pose: Tuple of (rvec, tvec) for board position
         show_axes: Boolean to control axis display (default False)
+        board: Optional ``chess.Board`` representing the current state. If
+            provided along with ``piece_models`` the board will be rendered in
+            3‑D and composited on top of the highlighted image.
+        piece_models: Mapping returned by :func:`load_piece_models` with STL
+            meshes for each piece.
     """
     # First undistort the image
     img = cv2.undistort(img, camera_matrix, dist_coeffs)
@@ -376,8 +395,83 @@ def highlight_chess_move(img, move_notation, inner_corners, board_size, square_s
     if show_axes:
         axis_length = SQUARE_SIZE / 1000.0  # Convert mm to meters - exactly one square length
         cv2.drawFrameAxes(final, camera_matrix, dist_coeffs, rvec, tvec, axis_length, 3)
-    
+
+    if board is not None and piece_models is not None:
+        final = render_board_overlay(final, board, piece_models, pose, camera_matrix)
+
     return final
+
+
+def load_piece_models(models_dir):
+    """Load STL models for each chess piece."""
+    pieces = {}
+    names = {
+        'P': 'pawn',
+        'N': 'knight',
+        'B': 'bishop',
+        'R': 'rook',
+        'Q': 'queen',
+        'K': 'king',
+    }
+    for color in ('white', 'black'):
+        for symbol, name in names.items():
+            key = color[0] + symbol.upper()
+            path = os.path.join(models_dir, f"{color}_{name}.stl")
+            pieces[key] = trimesh.load(path)
+    return pieces
+
+
+def _square_to_coords(square):
+    row = 7 - chess.square_rank(square)
+    col = chess.square_file(square)
+    return row, col
+
+
+def _piece_pose(row, col, height=0.0):
+    T = np.eye(4, dtype=np.float32)
+    T[0, 3] = col * square_size_m
+    T[1, 3] = row * square_size_m
+    T[2, 3] = height
+    return T
+
+
+def render_board_overlay(frame, board, models, pose, cam_matrix):
+    """Render a 3-D board state and composite it over ``frame``."""
+    rvec, tvec = pose
+    R, _ = cv2.Rodrigues(rvec)
+    T_board = np.eye(4, dtype=np.float32)
+    T_board[:3, :3] = R
+    T_board[:3, 3] = tvec.squeeze()
+
+    scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.3, 0.3, 0.3])
+
+    camera = pyrender.IntrinsicsCamera(
+        fx=cam_matrix[0, 0],
+        fy=cam_matrix[1, 1],
+        cx=cam_matrix[0, 2],
+        cy=cam_matrix[1, 2],
+    )
+    scene.add(camera, pose=T_board)
+
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.0)
+    scene.add(light, pose=T_board)
+
+    for square, piece in board.piece_map().items():
+        row, col = _square_to_coords(square)
+        key = ('w' if piece.color == chess.WHITE else 'b') + piece.symbol().upper()
+        mesh = models.get(key)
+        if mesh is None:
+            continue
+        scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False),
+                  pose=T_board @ _piece_pose(row, col))
+
+    renderer = pyrender.OffscreenRenderer(frame.shape[1], frame.shape[0])
+    color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    renderer.delete()
+
+    overlay = color[:, :, :3]
+    alpha = color[:, :, 3:] / 255.0
+    return (overlay * alpha + frame * (1 - alpha)).astype(np.uint8)
 
 def save_board_transform(camera_id, inner_corners, board_size, square_size, pose):
     """
