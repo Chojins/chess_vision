@@ -403,11 +403,13 @@ def highlight_chess_move(
     return final
 
 
-def load_piece_models(models_dir):
+def load_piece_models(models_dir, scale=0.001):
     """Load STL models for each chess piece.
 
     The directory should contain single STL files named ``pawn.stl`` etc.  The
-    same model is reused for both colours.
+    same model is reused for both colours. ``scale`` is applied to each mesh on
+    load so models exported in millimetres match the metre-based board
+    transform.
     """
     pieces = {}
     names = {
@@ -422,6 +424,9 @@ def load_piece_models(models_dir):
     for symbol, name in names.items():
         path = os.path.join(models_dir, f"{name}.stl")
         mesh = trimesh.load(path)
+        # Convert millimetre-based meshes to metres
+        if scale != 1.0:
+            mesh.apply_scale(scale)
         pieces['w' + symbol] = mesh
         pieces['b' + symbol] = mesh
 

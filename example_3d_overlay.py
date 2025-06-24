@@ -4,7 +4,8 @@ import chess_vision
 
 from chess_vision import load_piece_models, generate_board_overlay, composite_overlay
 
-# Directory containing ``pawn.stl``, ``rook.stl`` etc.
+# Directory containing ``pawn.stl``, ``rook.stl`` etc.  Models are assumed to
+# be exported in millimetres and are automatically scaled to metres on load.
 MODELS_DIR = "stl"
 
 

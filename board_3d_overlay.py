@@ -9,11 +9,13 @@ SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0
 
 
-def load_piece_models(models_dir):
+def load_piece_models(models_dir, scale=0.001):
     """Load STL models for each chess piece.
 
     The directory is expected to contain files named ``pawn.stl`` ``rook.stl``
-    and so on.  The same models are used for both colours.
+    and so on.  The same models are used for both colours. ``scale`` is applied
+    to each mesh on load so models defined in millimetres can be converted to
+    metres.
     """
     pieces = {}
     names = {
@@ -28,6 +30,9 @@ def load_piece_models(models_dir):
     for symbol, name in names.items():
         path = os.path.join(models_dir, f"{name}.stl")
         mesh = trimesh.load(path)
+        # Scale the mesh so coordinates in millimetres become metres
+        if scale != 1.0:
+            mesh.apply_scale(scale)
         pieces['w' + symbol] = mesh
         pieces['b' + symbol] = mesh
 
