@@ -1,0 +1,1 @@
+This directory should contain PNG images for chess pieces used by the 3D overlay example. File names should match the piece symbols from python-chess, e.g. `K.png` for the white king and `p.png` for a black pawn.

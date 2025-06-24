@@ -5,6 +5,7 @@ import glob
 import pickle
 import json
 import datetime
+import chess
 
 SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
@@ -376,8 +377,70 @@ def highlight_chess_move(img, move_notation, inner_corners, board_size, square_s
     if show_axes:
         axis_length = SQUARE_SIZE / 1000.0  # Convert mm to meters - exactly one square length
         cv2.drawFrameAxes(final, camera_matrix, dist_coeffs, rvec, tvec, axis_length, 3)
-    
+
     return final
+
+
+def load_piece_models(model_dir: str, piece_size: int = 100) -> dict:
+    """Load PNG models for all chess pieces.
+
+    The directory should contain images named with piece symbols,
+    e.g. ``K.png`` for the white king or ``p.png`` for a black pawn.
+    Images are resized to ``piece_size`` and returned as a dictionary
+    keyed by the piece symbol used by :mod:`python-chess`.
+    """
+    models = {}
+    for symbol in ["p", "r", "n", "b", "q", "k", "P", "R", "N", "B", "Q", "K"]:
+        path = os.path.join(model_dir, f"{symbol}.png")
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            continue
+        if piece_size is not None:
+            img = cv2.resize(img, (piece_size, piece_size), interpolation=cv2.INTER_AREA)
+        models[symbol] = img
+    return models
+
+
+def generate_board_overlay(board: chess.Board, piece_models: dict, square_size: int = 100) -> np.ndarray:
+    """Generate a top-down overlay image for the given board state."""
+    board_size = square_size * 8
+    overlay = np.zeros((board_size, board_size, 4), dtype=np.uint8)
+
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if not piece:
+            continue
+        symbol = piece.symbol()
+        img = piece_models.get(symbol)
+        if img is None:
+            continue
+        row = 7 - chess.square_rank(square)
+        col = chess.square_file(square)
+        y = row * square_size
+        x = col * square_size
+        h, w = img.shape[:2]
+        overlay[y:y + h, x:x + w] = img
+    return overlay
+
+
+def render_board_overlay(frame: np.ndarray, overlay: np.ndarray, inner_corners: np.ndarray) -> np.ndarray:
+    """Warp a top-down overlay onto ``frame`` using ``inner_corners``."""
+    board_size = overlay.shape[0]
+    src = np.float32([[0, 0], [board_size, 0], [board_size, board_size], [0, board_size]])
+    matrix = cv2.getPerspectiveTransform(src, inner_corners.astype(np.float32))
+    warped = cv2.warpPerspective(overlay, matrix, (frame.shape[1], frame.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_TRANSPARENT)
+    return warped
+
+
+def composite_overlay(frame: np.ndarray, overlay: np.ndarray, alpha: float = 1.0) -> np.ndarray:
+    """Blend ``overlay`` over ``frame`` using ``alpha`` for non-transparent pixels."""
+    if overlay.shape[2] == 4:
+        mask = overlay[..., 3:] / 255.0
+        base = frame.astype(float)
+        over = overlay[..., :3].astype(float)
+        result = (over * mask * alpha + base * (1 - mask * alpha)).astype(np.uint8)
+        return result
+    return cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
 def save_board_transform(camera_id, inner_corners, board_size, square_size, pose):
     """
