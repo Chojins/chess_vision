@@ -327,7 +327,8 @@ def highlight_chess_move(
             provided along with ``piece_models`` the board will be rendered in
             3‑D and composited on top of the highlighted image.
         piece_models: Mapping returned by :func:`load_piece_models` with STL
-            meshes for each piece.
+            meshes for each piece. White pieces are shown in blue and black
+            pieces in red.
     """
     # First undistort the image
     img = cv2.undistort(img, camera_matrix, dist_coeffs)
@@ -403,7 +404,11 @@ def highlight_chess_move(
 
 
 def load_piece_models(models_dir):
-    """Load STL models for each chess piece."""
+    """Load STL models for each chess piece.
+
+    The directory should contain single STL files named ``pawn.stl`` etc.  The
+    same model is reused for both colours.
+    """
     pieces = {}
     names = {
         'P': 'pawn',
@@ -413,11 +418,13 @@ def load_piece_models(models_dir):
         'Q': 'queen',
         'K': 'king',
     }
-    for color in ('white', 'black'):
-        for symbol, name in names.items():
-            key = color[0] + symbol.upper()
-            path = os.path.join(models_dir, f"{color}_{name}.stl")
-            pieces[key] = trimesh.load(path)
+
+    for symbol, name in names.items():
+        path = os.path.join(models_dir, f"{name}.stl")
+        mesh = trimesh.load(path)
+        pieces['w' + symbol] = mesh
+        pieces['b' + symbol] = mesh
+
     return pieces
 
 
@@ -462,8 +469,14 @@ def render_board_overlay(frame, board, models, pose, cam_matrix):
         mesh = models.get(key)
         if mesh is None:
             continue
-        scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False),
-                  pose=T_board @ _piece_pose(row, col))
+        color = [0.0, 0.0, 1.0, 1.0] if piece.color == chess.WHITE else [1.0, 0.0, 0.0, 1.0]
+        material = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.5
+        )
+        scene.add(
+            pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False),
+            pose=T_board @ _piece_pose(row, col),
+        )
 
     renderer = pyrender.OffscreenRenderer(frame.shape[1], frame.shape[0])
     color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)

@@ -4,6 +4,7 @@ import chess_vision
 
 from chess_vision import load_piece_models
 
+# Directory containing ``pawn.stl``, ``rook.stl`` etc.
 MODELS_DIR = "stl"
 
 

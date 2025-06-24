@@ -9,7 +9,11 @@ square_size_m = SQUARE_SIZE / 1000.0
 
 
 def load_piece_models(models_dir):
-    """Load STL models for each chess piece."""
+    """Load STL models for each chess piece.
+
+    The directory is expected to contain files named ``pawn.stl`` ``rook.stl``
+    and so on.  The same models are used for both colours.
+    """
     pieces = {}
     names = {
         'P': 'pawn',
@@ -17,14 +21,15 @@ def load_piece_models(models_dir):
         'B': 'bishop',
         'R': 'rook',
         'Q': 'queen',
-        'K': 'king'
+        'K': 'king',
     }
-    for color in ('white', 'black'):
-        for symbol, name in names.items():
-            key = (color[0] + symbol.upper())
-            path = f"{models_dir}/{color}_{name}.stl"
-            mesh = trimesh.load(path)
-            pieces[key] = mesh
+
+    for symbol, name in names.items():
+        path = f"{models_dir}/{name}.stl"
+        mesh = trimesh.load(path)
+        pieces['w' + symbol] = mesh
+        pieces['b' + symbol] = mesh
+
     return pieces
 
 
@@ -68,7 +73,11 @@ def render_board_state(frame, board, models, pose, camera_matrix):
         key = (('w' if piece.color == chess.WHITE else 'b') + piece.symbol().upper())
         if key not in models:
             continue
-        mesh = pyrender.Mesh.from_trimesh(models[key], smooth=False)
+        color = [0.0, 0.0, 1.0, 1.0] if piece.color == chess.WHITE else [1.0, 0.0, 0.0, 1.0]
+        material = pyrender.MetallicRoughnessMaterial(baseColorFactor=color,
+                                                      metallicFactor=0.0,
+                                                      roughnessFactor=0.5)
+        mesh = pyrender.Mesh.from_trimesh(models[key], material=material, smooth=False)
         piece_pose = T_board @ compute_piece_pose(row, col)
         scene.add(mesh, pose=piece_pose)
 
