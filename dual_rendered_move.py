@@ -20,7 +20,8 @@ from pyvirtualcam import PixelFormat
 
 from board_3d_overlay import (
     load_piece_models,
-    render_board_state_with_move,
+    generate_board_overlay_with_move,
+    composite_overlay,
 )
 
 # --------------------------
@@ -142,6 +143,8 @@ def main():
         current_move = None
         last_move_was_white = None
         board_img_cache = generate_board_image(board, None)
+        overlay_black = None
+        overlay_white = None
 
         while True:
             ret_b, frame_black = cap_black.read()
@@ -161,22 +164,13 @@ def main():
                 else:
                     highlight_for_white = True
 
-            final_black_frame = render_board_state_with_move(
-                frame_black,
-                board,
-                models,
-                (black_transform['rvec'], black_transform['tvec']),
-                chess_vision.camera_matrix,
-                current_move if highlight_for_black else None,
-            )
-            final_white_frame = render_board_state_with_move(
-                frame_white,
-                board,
-                models,
-                (white_transform['rvec'], white_transform['tvec']),
-                chess_vision.camera_matrix,
-                current_move if highlight_for_white else None,
-            )
+            final_black_frame = frame_black
+            final_white_frame = frame_white
+
+            if highlight_for_black and overlay_black is not None:
+                final_black_frame = composite_overlay(frame_black, overlay_black)
+            if highlight_for_white and overlay_white is not None:
+                final_white_frame = composite_overlay(frame_white, overlay_white)
 
 
             v_cam4.send(cv2.cvtColor(final_black_frame, cv2.COLOR_BGR2RGB))
@@ -201,6 +195,24 @@ def main():
                     board.push(next_move)
                     current_move = next_move
                     board_img_cache = generate_board_image(board, current_move)
+                    overlay_black = generate_board_overlay_with_move(
+                        board,
+                        models,
+                        (black_transform['rvec'], black_transform['tvec']),
+                        chess_vision.camera_matrix,
+                        640,
+                        480,
+                        current_move,
+                    )
+                    overlay_white = generate_board_overlay_with_move(
+                        board,
+                        models,
+                        (white_transform['rvec'], white_transform['tvec']),
+                        chess_vision.camera_matrix,
+                        640,
+                        480,
+                        current_move,
+                    )
                 else:
                     print(f"Game over. Result: {board.result()}")
             elif key == ord('r'):
@@ -208,6 +220,8 @@ def main():
                 current_move = None
                 last_move_was_white = None
                 board_img_cache = generate_board_image(board, None)
+                overlay_black = None
+                overlay_white = None
                 print("Board reset.")
 
         cap_black.release()
