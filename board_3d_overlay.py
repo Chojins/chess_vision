@@ -55,12 +55,19 @@ def square_to_board_coords(square):
     return row, col
 
 
-def compute_piece_pose(row, col, height=0.0):
+def compute_piece_pose(row, col, key, height=0.0):
     """Return a transformation that places a piece in the centre of ``row``, ``col``."""
     T = np.eye(4, dtype=np.float32)
     T[0, 3] = (col + 0.5) * square_size_m
     T[1, 3] = (row + 0.5) * square_size_m
     T[2, 3] = height
+
+    #check if the piece is a white knight and rotate it 180 about z
+    if key == 'wN':
+        R = np.array([[np.cos(np.pi), -np.sin(np.pi), 0],
+                       [np.sin(np.pi),  np.cos(np.pi), 0],
+                       [0,              0,             1]])
+        T[:3, :3] = R @ T[:3, :3]
     return T
 
 
@@ -101,7 +108,7 @@ def render_board_state(frame, board, models, pose, camera_matrix):
 
     for square, piece in board.piece_map().items():
         row, col = square_to_board_coords(square)
-        key = (('w' if piece.color == False else 'b') + piece.symbol().upper())
+        key = (('b' if piece.color == False else 'w') + piece.symbol().upper())
         if key not in models:
             continue
 
@@ -112,12 +119,12 @@ def render_board_state(frame, board, models, pose, camera_matrix):
             color = WHITE_COLOR
         else:
             color = BLACK_COLOR
-            
+
         material = pyrender.MetallicRoughnessMaterial(baseColorFactor=color,
                                                       metallicFactor=0.0,
                                                       roughnessFactor=0.5)
         mesh = pyrender.Mesh.from_trimesh(models[key], material=material, smooth=False)
-        scene.add(mesh, pose=compute_piece_pose(row, col))
+        scene.add(mesh, pose=compute_piece_pose(row, col, key))
 
     renderer = pyrender.OffscreenRenderer(frame.shape[1], frame.shape[0])
     color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
@@ -150,7 +157,7 @@ def generate_board_overlay(board, models, pose, camera_matrix, width, height):
 
     for square, piece in board.piece_map().items():
         row, col = square_to_board_coords(square)
-        key = ("w" if piece.color == False else "b") + piece.symbol().upper()
+        key = ("b" if piece.color == False else "w") + piece.symbol().upper()
         mesh = models.get(key)
         if mesh is None:
             continue
@@ -168,7 +175,7 @@ def generate_board_overlay(board, models, pose, camera_matrix, width, height):
         )
         scene.add(
             pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False),
-            pose=compute_piece_pose(row, col),
+            pose=compute_piece_pose(row, col, key),
         )
 
     renderer = pyrender.OffscreenRenderer(width, height)
