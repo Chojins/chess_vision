@@ -43,8 +43,14 @@ def load_piece_models(models_dir, scale=0.001):
 
 
 def square_to_board_coords(square):
-    """Convert a chess square index (0..63) to board row/col."""
-    row = 7 - chess.square_rank(square)
+    """Convert a chess square index (0..63) to board ``row`` and ``col``.
+
+    ``python-chess`` numbers squares from ``a1`` (index ``0``) in the bottom left
+    corner when viewed from White's side.  The board calibration used by the
+    overlay routine follows the same convention, so no mirroring is required
+    when mapping squares to board coordinates.
+    """
+    row = chess.square_rank(square)
     col = chess.square_file(square)
     return row, col
 
@@ -95,12 +101,18 @@ def render_board_state(frame, board, models, pose, camera_matrix):
 
     for square, piece in board.piece_map().items():
         row, col = square_to_board_coords(square)
-        key = (('w' if piece.color == chess.WHITE else 'b') + piece.symbol().upper())
+        key = (('w' if piece.color == False else 'b') + piece.symbol().upper())
         if key not in models:
             continue
-        color = ([0.0, 0.0, 1.0, PIECE_ALPHA]
-                 if piece.color == chess.WHITE
-                 else [1.0, 0.0, 0.0, PIECE_ALPHA])
+
+        WHITE_COLOR = [0.0, 0.0, 1.0, PIECE_ALPHA]  # Blue with alpha
+        BLACK_COLOR = [1.0, 0.0, 0.0, PIECE_ALPHA]  # Red with alpha
+
+        if piece.color == False:
+            color = WHITE_COLOR
+        else:
+            color = BLACK_COLOR
+            
         material = pyrender.MetallicRoughnessMaterial(baseColorFactor=color,
                                                       metallicFactor=0.0,
                                                       roughnessFactor=0.5)
@@ -138,13 +150,19 @@ def generate_board_overlay(board, models, pose, camera_matrix, width, height):
 
     for square, piece in board.piece_map().items():
         row, col = square_to_board_coords(square)
-        key = ("w" if piece.color == chess.WHITE else "b") + piece.symbol().upper()
+        key = ("w" if piece.color == False else "b") + piece.symbol().upper()
         mesh = models.get(key)
         if mesh is None:
             continue
-        color = ([0.0, 0.0, 1.0, PIECE_ALPHA]
-                 if piece.color == chess.WHITE
-                 else [1.0, 0.0, 0.0, PIECE_ALPHA])
+
+        WHITE_COLOR = [0.0, 0.0, 1.0, PIECE_ALPHA]  # Blue with alpha
+        BLACK_COLOR = [1.0, 0.0, 0.0, PIECE_ALPHA]  # Red with alpha
+
+        if piece.color == False:
+            color = WHITE_COLOR
+        else:
+            color = BLACK_COLOR
+
         material = pyrender.MetallicRoughnessMaterial(
             baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.5
         )
@@ -164,4 +182,3 @@ def composite_overlay(frame, overlay_rgba):
     overlay = overlay_rgba[:, :, :3]
     alpha = overlay_rgba[:, :, 3:] / 255.0
     return (overlay * alpha + frame * (1 - alpha)).astype(np.uint8)
-
