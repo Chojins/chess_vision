@@ -54,25 +54,40 @@ def compute_piece_pose(row, col, height=0.0):
     return T
 
 
-def render_board_state(frame, board, models, pose, camera_matrix):
+def _camera_pose(pose):
+    """Return a pose matrix for ``pyrender`` cameras from OpenCV rvec/tvec."""
     rvec, tvec = pose
     R, _ = cv2.Rodrigues(rvec)
-    T_board = np.eye(4)
+    T_board = np.eye(4, dtype=np.float32)
     T_board[:3, :3] = R
     T_board[:3, 3] = tvec.squeeze()
 
+    T_camera_in_board = np.linalg.inv(T_board)
+    R_x180 = np.array([[1, 0, 0],
+                       [0, -1, 0],
+                       [0, 0, -1]], dtype=np.float32)
+    T_xrotate = np.eye(4, dtype=np.float32)
+    T_xrotate[:3, :3] = R_x180
+    return T_camera_in_board @ T_xrotate
+
+
+def render_board_state(frame, board, models, pose, camera_matrix):
     scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.3, 0.3, 0.3])
 
     camera = pyrender.IntrinsicsCamera(
         fx=camera_matrix[0, 0],
         fy=camera_matrix[1, 1],
         cx=camera_matrix[0, 2],
-        cy=camera_matrix[1, 2]
+        cy=camera_matrix[1, 2],
+        znear=0.01,
+        zfar=10.0,
     )
-    scene.add(camera, pose=T_board)
+    scene.add(camera, pose=_camera_pose(pose))
 
-    light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.0)
-    scene.add(light, pose=T_board)
+    light_pose = np.eye(4)
+    light_pose[:3, 3] = [-40, 60, 80]
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=4.0)
+    scene.add(light, pose=light_pose)
 
     for square, piece in board.piece_map().items():
         row, col = square_to_board_coords(square)
@@ -84,8 +99,7 @@ def render_board_state(frame, board, models, pose, camera_matrix):
                                                       metallicFactor=0.0,
                                                       roughnessFactor=0.5)
         mesh = pyrender.Mesh.from_trimesh(models[key], material=material, smooth=False)
-        piece_pose = T_board @ compute_piece_pose(row, col)
-        scene.add(mesh, pose=piece_pose)
+        scene.add(mesh, pose=compute_piece_pose(row, col))
 
     renderer = pyrender.OffscreenRenderer(frame.shape[1], frame.shape[0])
     color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
@@ -99,12 +113,6 @@ def render_board_state(frame, board, models, pose, camera_matrix):
 
 def generate_board_overlay(board, models, pose, camera_matrix, width, height):
     """Render the board once and return a transparent RGBA overlay."""
-    rvec, tvec = pose
-    R, _ = cv2.Rodrigues(rvec)
-    T_board = np.eye(4, dtype=np.float32)
-    T_board[:3, :3] = R
-    T_board[:3, 3] = tvec.squeeze()
-
     scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.3, 0.3, 0.3])
 
     camera = pyrender.IntrinsicsCamera(
@@ -112,11 +120,15 @@ def generate_board_overlay(board, models, pose, camera_matrix, width, height):
         fy=camera_matrix[1, 1],
         cx=camera_matrix[0, 2],
         cy=camera_matrix[1, 2],
+        znear=0.01,
+        zfar=10.0,
     )
-    scene.add(camera, pose=T_board)
+    scene.add(camera, pose=_camera_pose(pose))
 
-    light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.0)
-    scene.add(light, pose=T_board)
+    light_pose = np.eye(4)
+    light_pose[:3, 3] = [-40, 60, 80]
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=4.0)
+    scene.add(light, pose=light_pose)
 
     for square, piece in board.piece_map().items():
         row, col = square_to_board_coords(square)
@@ -130,7 +142,7 @@ def generate_board_overlay(board, models, pose, camera_matrix, width, height):
         )
         scene.add(
             pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False),
-            pose=T_board @ compute_piece_pose(row, col),
+            pose=compute_piece_pose(row, col),
         )
 
     renderer = pyrender.OffscreenRenderer(width, height)
