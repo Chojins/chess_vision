@@ -8,6 +8,9 @@ import chess
 SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0
 
+# Pieces are rendered slightly transparent so the camera feed is still visible
+PIECE_ALPHA = 0.7
+
 
 def load_piece_models(models_dir, scale=0.001):
     """Load STL models for each chess piece.
@@ -47,9 +50,10 @@ def square_to_board_coords(square):
 
 
 def compute_piece_pose(row, col, height=0.0):
+    """Return a transformation that places a piece in the centre of ``row``, ``col``."""
     T = np.eye(4, dtype=np.float32)
-    T[0, 3] = col * square_size_m
-    T[1, 3] = row * square_size_m
+    T[0, 3] = (col + 0.5) * square_size_m
+    T[1, 3] = (row + 0.5) * square_size_m
     T[2, 3] = height
     return T
 
@@ -94,7 +98,9 @@ def render_board_state(frame, board, models, pose, camera_matrix):
         key = (('w' if piece.color == chess.WHITE else 'b') + piece.symbol().upper())
         if key not in models:
             continue
-        color = [0.0, 0.0, 1.0, 1.0] if piece.color == chess.WHITE else [1.0, 0.0, 0.0, 1.0]
+        color = ([0.0, 0.0, 1.0, PIECE_ALPHA]
+                 if piece.color == chess.WHITE
+                 else [1.0, 0.0, 0.0, PIECE_ALPHA])
         material = pyrender.MetallicRoughnessMaterial(baseColorFactor=color,
                                                       metallicFactor=0.0,
                                                       roughnessFactor=0.5)
@@ -136,7 +142,9 @@ def generate_board_overlay(board, models, pose, camera_matrix, width, height):
         mesh = models.get(key)
         if mesh is None:
             continue
-        color = [0.0, 0.0, 1.0, 1.0] if piece.color == chess.WHITE else [1.0, 0.0, 0.0, 1.0]
+        color = ([0.0, 0.0, 1.0, PIECE_ALPHA]
+                 if piece.color == chess.WHITE
+                 else [1.0, 0.0, 0.0, PIECE_ALPHA])
         material = pyrender.MetallicRoughnessMaterial(
             baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.5
         )
