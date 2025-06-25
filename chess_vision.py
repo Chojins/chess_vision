@@ -5,6 +5,15 @@ import glob
 import pickle
 import json
 import datetime
+import chess
+from board_3d_overlay import (
+    load_piece_models,
+    render_board_state,
+    generate_board_overlay,
+    composite_overlay,
+)
+# Maintain previous public name
+render_board_overlay = render_board_state
 
 SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
@@ -298,9 +307,20 @@ def find_chessboard_corners(img, use_white_side=True):
     
     return inner_corners, board_full_size, square_size, (rvec, tvec)
 
-def highlight_chess_move(img, move_notation, inner_corners, board_size, square_size, pose, show_axes=False):
+def highlight_chess_move(
+    img,
+    move_notation,
+    inner_corners,
+    board_size,
+    square_size,
+    pose,
+    show_axes=False,
+    board=None,
+    piece_models=None,
+):
     """
     Highlights chess moves on a perspective view of a chess board.
+
     Args:
         img: Input image
         move_notation: Chess move in algebraic notation
@@ -309,6 +329,12 @@ def highlight_chess_move(img, move_notation, inner_corners, board_size, square_s
         square_size: Size of each square
         pose: Tuple of (rvec, tvec) for board position
         show_axes: Boolean to control axis display (default False)
+        board: Optional ``chess.Board`` representing the current state. If
+            provided along with ``piece_models`` the board will be rendered in
+            3‑D and composited on top of the highlighted image.
+        piece_models: Mapping returned by :func:`load_piece_models` with STL
+            meshes for each piece. White pieces are shown in blue and black
+            pieces in red.
     """
     # First undistort the image
     img = cv2.undistort(img, camera_matrix, dist_coeffs)
@@ -376,8 +402,13 @@ def highlight_chess_move(img, move_notation, inner_corners, board_size, square_s
     if show_axes:
         axis_length = SQUARE_SIZE / 1000.0  # Convert mm to meters - exactly one square length
         cv2.drawFrameAxes(final, camera_matrix, dist_coeffs, rvec, tvec, axis_length, 3)
-    
+
+    if board is not None and piece_models is not None:
+        final = render_board_state(final, board, piece_models, pose, camera_matrix)
+
     return final
+
+
 
 def save_board_transform(camera_id, inner_corners, board_size, square_size, pose):
     """
