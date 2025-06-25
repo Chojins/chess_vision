@@ -6,8 +6,14 @@ import pickle
 import json
 import datetime
 import chess
-import pyrender
-import trimesh
+from board_3d_overlay import (
+    load_piece_models,
+    render_board_state,
+    generate_board_overlay,
+    composite_overlay,
+)
+# Maintain previous public name
+render_board_overlay = render_board_state
 
 SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
@@ -398,163 +404,11 @@ def highlight_chess_move(
         cv2.drawFrameAxes(final, camera_matrix, dist_coeffs, rvec, tvec, axis_length, 3)
 
     if board is not None and piece_models is not None:
-        final = render_board_overlay(final, board, piece_models, pose, camera_matrix)
+        final = render_board_state(final, board, piece_models, pose, camera_matrix)
 
     return final
 
 
-def load_piece_models(models_dir, scale=0.001):
-    """Load STL models for each chess piece.
-
-    The directory should contain single STL files named ``pawn.stl`` etc.  The
-    same model is reused for both colours. ``scale`` is applied to each mesh on
-    load so models exported in millimetres match the metre-based board
-    transform.
-    """
-    pieces = {}
-    names = {
-        'P': 'pawn',
-        'N': 'knight',
-        'B': 'bishop',
-        'R': 'rook',
-        'Q': 'queen',
-        'K': 'king',
-    }
-
-    for symbol, name in names.items():
-        path = os.path.join(models_dir, f"{name}.stl")
-        mesh = trimesh.load(path)
-        # Convert millimetre-based meshes to metres
-        if scale != 1.0:
-            mesh.apply_scale(scale)
-        pieces['w' + symbol] = mesh
-        pieces['b' + symbol] = mesh
-
-    return pieces
-
-
-def _square_to_coords(square):
-    row = 7 - chess.square_rank(square)
-    col = chess.square_file(square)
-    return row, col
-
-
-def _piece_pose(row, col, height=0.0):
-    T = np.eye(4, dtype=np.float32)
-    T[0, 3] = col * square_size_m
-    T[1, 3] = row * square_size_m
-    T[2, 3] = height
-    return T
-
-
-def _camera_pose(pose):
-    """Return a pose matrix for pyrender from an OpenCV pose."""
-    rvec, tvec = pose
-    R, _ = cv2.Rodrigues(rvec)
-    T_board = np.eye(4, dtype=np.float32)
-    T_board[:3, :3] = R
-    T_board[:3, 3] = tvec.squeeze()
-
-    T_camera_in_board = np.linalg.inv(T_board)
-    R_x180 = np.array([[1, 0, 0],
-                       [0, -1, 0],
-                       [0, 0, -1]], dtype=np.float32)
-    T_xrotate = np.eye(4, dtype=np.float32)
-    T_xrotate[:3, :3] = R_x180
-    return T_camera_in_board @ T_xrotate
-
-def render_board_overlay(frame, board, models, pose, cam_matrix):
-    """Render a 3-D board state and composite it over ``frame``."""
-    scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.3, 0.3, 0.3])
-
-    camera = pyrender.IntrinsicsCamera(
-        fx=cam_matrix[0, 0],
-        fy=cam_matrix[1, 1],
-        cx=cam_matrix[0, 2],
-        cy=cam_matrix[1, 2],
-        znear=0.01,
-        zfar=10.0,
-    )
-    scene.add(camera, pose=_camera_pose(pose))
-
-    light_pose = np.eye(4)
-    light_pose[:3, 3] = [-40, 60, 80]
-    light = pyrender.DirectionalLight(color=np.ones(3), intensity=4.0)
-    scene.add(light, pose=light_pose)
-
-    for square, piece in board.piece_map().items():
-        row, col = _square_to_coords(square)
-        key = ('w' if piece.color == chess.WHITE else 'b') + piece.symbol().upper()
-        mesh = models.get(key)
-        if mesh is None:
-            continue
-        color = [0.0, 0.0, 1.0, 1.0] if piece.color == chess.WHITE else [1.0, 0.0, 0.0, 1.0]
-        material = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.5
-        )
-        scene.add(
-            pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False),
-            pose=_piece_pose(row, col),
-        )
-
-    renderer = pyrender.OffscreenRenderer(frame.shape[1], frame.shape[0])
-    color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-    renderer.delete()
-
-    overlay = color[:, :, :3]
-    alpha = color[:, :, 3:] / 255.0
-    return (overlay * alpha + frame * (1 - alpha)).astype(np.uint8)
-
-
-def generate_board_overlay(board, models, pose, cam_matrix, width, height):
-    """Render the board to a transparent RGBA image.
-
-    This is useful when the camera is stationary and the pose does not change:
-    the returned overlay can be composited onto each frame without re-rendering.
-    """
-    scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.3, 0.3, 0.3])
-
-    camera = pyrender.IntrinsicsCamera(
-        fx=cam_matrix[0, 0],
-        fy=cam_matrix[1, 1],
-        cx=cam_matrix[0, 2],
-        cy=cam_matrix[1, 2],
-        znear=0.01,
-        zfar=10.0,
-    )
-    scene.add(camera, pose=_camera_pose(pose))
-
-    light_pose = np.eye(4)
-    light_pose[:3, 3] = [-40, 60, 80]
-    light = pyrender.DirectionalLight(color=np.ones(3), intensity=4.0)
-    scene.add(light, pose=light_pose)
-
-    for square, piece in board.piece_map().items():
-        row, col = _square_to_coords(square)
-        key = ('w' if piece.color == chess.WHITE else 'b') + piece.symbol().upper()
-        mesh = models.get(key)
-        if mesh is None:
-            continue
-        color = [0.0, 0.0, 1.0, 1.0] if piece.color == chess.WHITE else [1.0, 0.0, 0.0, 1.0]
-        material = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.5
-        )
-        scene.add(
-            pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False),
-            pose=_piece_pose(row, col),
-        )
-
-    renderer = pyrender.OffscreenRenderer(width, height)
-    color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-    renderer.delete()
-    return color
-
-
-def composite_overlay(frame, overlay_rgba):
-    """Blend a pre-rendered RGBA overlay with ``frame``."""
-    overlay = overlay_rgba[:, :, :3]
-    alpha = overlay_rgba[:, :, 3:] / 255.0
-    return (overlay * alpha + frame * (1 - alpha)).astype(np.uint8)
 
 def save_board_transform(camera_id, inner_corners, board_size, square_size, pose):
     """

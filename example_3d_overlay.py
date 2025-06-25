@@ -1,8 +1,7 @@
 import cv2
 import chess
 import chess_vision
-
-from chess_vision import load_piece_models, generate_board_overlay, composite_overlay
+from board_3d_overlay import load_piece_models, generate_board_overlay, composite_overlay
 
 # Directory containing ``pawn.stl``, ``rook.stl`` etc.  Models are assumed to
 # be exported in millimetres and are automatically scaled to metres on load.
