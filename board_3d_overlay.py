@@ -189,3 +189,142 @@ def composite_overlay(frame, overlay_rgba):
     overlay = overlay_rgba[:, :, :3]
     alpha = overlay_rgba[:, :, 3:] / 255.0
     return (overlay * alpha + frame * (1 - alpha)).astype(np.uint8)
+
+
+
+def _square_pose(row, col, thickness=0.001):
+    """Return a pose that places a thin box on the board square."""
+    T = np.eye(4, dtype=np.float32)
+    T[0, 3] = (col + 0.5) * square_size_m
+    T[1, 3] = (row + 0.5) * square_size_m
+    T[2, 3] = thickness / 2
+    return T
+
+
+def generate_board_overlay_with_move(board, models, pose, camera_matrix,
+                                     width, height, move=None):
+    """Return a transparent RGBA render of the board with ``move`` highlighted."""
+    scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.3, 0.3, 0.3])
+
+    camera = pyrender.IntrinsicsCamera(
+        fx=camera_matrix[0, 0],
+        fy=camera_matrix[1, 1],
+        cx=camera_matrix[0, 2],
+        cy=camera_matrix[1, 2],
+        znear=0.01,
+        zfar=10.0,
+    )
+    scene.add(camera, pose=_camera_pose(pose))
+
+    light_pose = np.eye(4)
+    light_pose[:3, 3] = [-40, 60, 80]
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=4.0)
+    scene.add(light, pose=light_pose)
+
+    for square, piece in board.piece_map().items():
+        row, col = square_to_board_coords(square)
+        key = ("b" if piece.color == False else "w") + piece.symbol().upper()
+        mesh = models.get(key)
+        if mesh is None:
+            continue
+
+        WHITE_COLOR = [0.0, 0.0, 1.0, PIECE_ALPHA]
+        BLACK_COLOR = [1.0, 0.0, 0.0, PIECE_ALPHA]
+        color = WHITE_COLOR if piece.color == False else BLACK_COLOR
+
+        material = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.5
+        )
+        scene.add(
+            pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False),
+            pose=compute_piece_pose(row, col, key),
+        )
+
+    if move is not None:
+        from_row, from_col = square_to_board_coords(move.from_square)
+        to_row, to_col = square_to_board_coords(move.to_square)
+        box = trimesh.creation.box(extents=[square_size_m, square_size_m, 0.001])
+
+        yellow = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=[1.0, 1.0, 0.0, 0.6], metallicFactor=0.0,
+            roughnessFactor=0.5
+        )
+        green = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=[0.0, 1.0, 0.0, 0.6], metallicFactor=0.0,
+            roughnessFactor=0.5
+        )
+
+        scene.add(pyrender.Mesh.from_trimesh(box, material=yellow, smooth=False),
+                  pose=_square_pose(from_row, from_col, 0.001))
+        scene.add(pyrender.Mesh.from_trimesh(box, material=green, smooth=False),
+                  pose=_square_pose(to_row, to_col, 0.001))
+
+    renderer = pyrender.OffscreenRenderer(width, height)
+    color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    renderer.delete()
+    return color
+
+
+def render_board_state_with_move(frame, board, models, pose, camera_matrix, move=None):
+    """Render the board with pieces and optionally highlight ``move``."""
+    scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.3, 0.3, 0.3])
+
+    camera = pyrender.IntrinsicsCamera(
+        fx=camera_matrix[0, 0],
+        fy=camera_matrix[1, 1],
+        cx=camera_matrix[0, 2],
+        cy=camera_matrix[1, 2],
+        znear=0.01,
+        zfar=10.0,
+    )
+    scene.add(camera, pose=_camera_pose(pose))
+
+    light_pose = np.eye(4)
+    light_pose[:3, 3] = [-40, 60, 80]
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=4.0)
+    scene.add(light, pose=light_pose)
+
+    for square, piece in board.piece_map().items():
+        row, col = square_to_board_coords(square)
+        key = ("b" if piece.color == False else "w") + piece.symbol().upper()
+        mesh = models.get(key)
+        if mesh is None:
+            continue
+
+        WHITE_COLOR = [0.0, 0.0, 1.0, PIECE_ALPHA]
+        BLACK_COLOR = [1.0, 0.0, 0.0, PIECE_ALPHA]
+        color = WHITE_COLOR if piece.color == False else BLACK_COLOR
+
+        material = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.5
+        )
+        scene.add(
+            pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False),
+            pose=compute_piece_pose(row, col, key),
+        )
+
+    if move is not None:
+        from_row, from_col = square_to_board_coords(move.from_square)
+        to_row, to_col = square_to_board_coords(move.to_square)
+        box = trimesh.creation.box(extents=[square_size_m, square_size_m, 0.001])
+
+        yellow = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=[1.0, 1.0, 0.0, 0.6], metallicFactor=0.0, roughnessFactor=0.5
+        )
+        green = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=[0.0, 1.0, 0.0, 0.6], metallicFactor=0.0, roughnessFactor=0.5
+        )
+
+        scene.add(pyrender.Mesh.from_trimesh(box, material=yellow, smooth=False),
+                  pose=_square_pose(from_row, from_col, 0.001))
+        scene.add(pyrender.Mesh.from_trimesh(box, material=green, smooth=False),
+                  pose=_square_pose(to_row, to_col, 0.001))
+
+    renderer = pyrender.OffscreenRenderer(frame.shape[1], frame.shape[0])
+    color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    renderer.delete()
+
+    overlay = color[:, :, :3]
+    alpha = color[:, :, 3:] / 255.0
+    return (overlay * alpha + frame * (1 - alpha)).astype(np.uint8)
+
