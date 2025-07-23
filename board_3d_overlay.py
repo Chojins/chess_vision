@@ -9,7 +9,7 @@ SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0
 
 # Pieces are rendered slightly transparent so the camera feed is still visible
-PIECE_ALPHA = 0.7
+PIECE_ALPHA = 0.3
 
 
 def load_piece_models(models_dir, scale=0.001):
@@ -246,11 +246,11 @@ def generate_board_overlay_with_move(board, models, pose, camera_matrix,
         box = trimesh.creation.box(extents=[square_size_m, square_size_m, 0.001])
 
         yellow = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=[1.0, 1.0, 0.0, 0.6], metallicFactor=0.0,
+            baseColorFactor=[1.0, 1.0, 0.0, 0.4], metallicFactor=0.0,
             roughnessFactor=0.5
         )
         green = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=[0.0, 1.0, 0.0, 0.6], metallicFactor=0.0,
+            baseColorFactor=[0.0, 1.0, 0.0, 0.4], metallicFactor=0.0,
             roughnessFactor=0.5
         )
 
@@ -309,10 +309,10 @@ def render_board_state_with_move(frame, board, models, pose, camera_matrix, move
         box = trimesh.creation.box(extents=[square_size_m, square_size_m, 0.001])
 
         yellow = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=[1.0, 1.0, 0.0, 0.6], metallicFactor=0.0, roughnessFactor=0.5
+            baseColorFactor=[1.0, 1.0, 0.0, 0.4], metallicFactor=0.0, roughnessFactor=0.5
         )
         green = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=[0.0, 1.0, 0.0, 0.6], metallicFactor=0.0, roughnessFactor=0.5
+            baseColorFactor=[0.0, 1.0, 0.0, 0.4], metallicFactor=0.0, roughnessFactor=0.5
         )
 
         scene.add(pyrender.Mesh.from_trimesh(box, material=yellow, smooth=False),
