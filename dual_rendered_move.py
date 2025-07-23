@@ -139,7 +139,12 @@ def main():
                 board.reset(); cur_move=None; last_move_white=None
                 last_board = generate_board_image(board, None)
                 ov_b = ov_w = None
-                with move_q.mutex: move_q.queue.clear()
+                # flush any pending render jobs
+                try:
+                    while True:
+                        move_q.get_nowait()        # or move_q.get(False)
+                except queue.Empty:
+                    pass
 
     cap_b.release(); cap_w.release(); cv2.destroyAllWindows(); engine.quit()
 
