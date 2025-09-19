@@ -1,0 +1,9 @@
+numpy
+opencv-python
+python-chess
+pyrender
+trimesh
+pyvirtualcam
+cairosvg
+PyOpenGL
+pyglet
