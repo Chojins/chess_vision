@@ -1,12 +1,12 @@
 import argparse
 import cv2
 import numpy as np
-import os
 import glob
 import pickle
 import json
 import datetime
 import chess
+from pathlib import Path
 from board_3d_overlay import (
     load_piece_models,
     render_board_state,
@@ -20,8 +20,13 @@ SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
 CHESSBOARD_SIZE = (7, 7)
 
+# Resolve resource paths relative to this script so it works from any CWD
+BASE_DIR = Path(__file__).resolve().parent
+CALIBRATION_PATH = BASE_DIR / "camera_calibration.pkl"
+BOARD_TRANSFORM_PATH = BASE_DIR / "board_transform.json"
+
 # Load camera calibration data
-with open('camera_calibration.pkl', 'rb') as f:
+with open(CALIBRATION_PATH, 'rb') as f:
     calibration_data = pickle.load(f)
     
 camera_matrix = calibration_data['camera_matrix']
@@ -67,7 +72,7 @@ def load_saved_transform(mode, camera_lookup):
     camera_keys = list(camera_lookup.keys())
     saved_transform = {key: None for key in camera_keys}
     try:
-        with open('board_transform.json', 'r') as f:
+        with open(BOARD_TRANSFORM_PATH, 'r') as f:
             raw_data = json.load(f)
 
         data = _normalize_transform_data(raw_data)
@@ -534,7 +539,7 @@ def save_board_transform(camera_id, inner_corners, board_size, square_size, pose
 
     # Load existing transforms if any
     try:
-        with open('board_transform.json', 'r') as f:
+        with open(BOARD_TRANSFORM_PATH, 'r') as f:
             transform_data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         transform_data = {}
@@ -555,7 +560,7 @@ def save_board_transform(camera_id, inner_corners, board_size, square_size, pose
     }
 
     # Save updated transforms
-    with open('board_transform.json', 'w') as f:
+    with open(BOARD_TRANSFORM_PATH, 'w') as f:
         json.dump(transform_data, f, indent=4)
 
     print(f"Board transform saved for camera {camera_id} in {mode} mode")
