@@ -1,11 +1,12 @@
+import argparse
 import cv2
 import numpy as np
-import os
 import glob
 import pickle
 import json
 import datetime
 import chess
+from pathlib import Path
 from board_3d_overlay import (
     load_piece_models,
     render_board_state,
@@ -19,50 +20,170 @@ SQUARE_SIZE = 22.5  # millimeters
 square_size_m = SQUARE_SIZE / 1000.0  # Convert mm to meters
 CHESSBOARD_SIZE = (7, 7)
 
+# Resolve resource paths relative to this script so it works from any CWD
+BASE_DIR = Path(__file__).resolve().parent
+CALIBRATION_PATH = BASE_DIR / "camera_calibration.pkl"
+BOARD_TRANSFORM_PATH = BASE_DIR / "board_transform.json"
+
 # Load camera calibration data
-with open('camera_calibration.pkl', 'rb') as f:
+with open(CALIBRATION_PATH, 'rb') as f:
     calibration_data = pickle.load(f)
     
 camera_matrix = calibration_data['camera_matrix']
 dist_coeffs = calibration_data['dist_coeffs']
 
-WHITE_SIDE_CAMERA = 2
-BLACK_SIDE_CAMERA = 0
+REAL_WHITE_CAMERA = 2
+REAL_BLACK_CAMERA = 0
+
+SIM_WHITE_CAMERA = "/World/so100_blue/gripper/Camera"
+SIM_BLACK_CAMERA = "/World/so100_red/gripper/Camera"
+
+REAL_MODE = "real"
+SIM_MODE = "sim"
 
 saved_transform = None
 
-def load_saved_transform():
+def _normalize_transform_data(transform_data):
+    """Ensure the transform data always contains mode-specific dictionaries."""
+    if not isinstance(transform_data, dict):
+        return {}
+
+    # Detect legacy format (no explicit mode separation)
+    legacy_keys = [
+        key for key in list(transform_data.keys())
+        if key not in (REAL_MODE, SIM_MODE)
+    ]
+
+    if legacy_keys:
+        legacy_data = {key: transform_data[key] for key in legacy_keys}
+        for key in legacy_keys:
+            transform_data.pop(key, None)
+        transform_data.setdefault(REAL_MODE, {}).update(legacy_data)
+
+    transform_data.setdefault(REAL_MODE, {})
+    transform_data.setdefault(SIM_MODE, {})
+    return transform_data
+
+def load_saved_transform(mode, camera_lookup):
     """
     Load and store the transform data for both cameras
     """
     global saved_transform
+    camera_keys = list(camera_lookup.keys())
+    saved_transform = {key: None for key in camera_keys}
     try:
-        with open('board_transform.json', 'r') as f:
-            data = json.load(f)
-        
-        # Now expecting a dict with transforms for both cameras
-        saved_transform = {
-            WHITE_SIDE_CAMERA: {
-                'inner_corners': np.array(data[str(WHITE_SIDE_CAMERA)]['inner_corners'], dtype=np.float32),
-                'board_size': data[str(WHITE_SIDE_CAMERA)]['board_size'],
-                'square_size': data[str(WHITE_SIDE_CAMERA)]['square_size'],
-                'rvec': np.array(data[str(WHITE_SIDE_CAMERA)]['rvec']),
-                'tvec': np.array(data[str(WHITE_SIDE_CAMERA)]['tvec']),
-                'use_white_side': True
-            } if str(WHITE_SIDE_CAMERA) in data else None,
-            BLACK_SIDE_CAMERA: {
-                'inner_corners': np.array(data[str(BLACK_SIDE_CAMERA)]['inner_corners'], dtype=np.float32),
-                'board_size': data[str(BLACK_SIDE_CAMERA)]['board_size'],
-                'square_size': data[str(BLACK_SIDE_CAMERA)]['square_size'],
-                'rvec': np.array(data[str(BLACK_SIDE_CAMERA)]['rvec']),
-                'tvec': np.array(data[str(BLACK_SIDE_CAMERA)]['tvec']),
-                'use_white_side': False
-            } if str(BLACK_SIDE_CAMERA) in data else None
-        }
+        with open(BOARD_TRANSFORM_PATH, 'r') as f:
+            raw_data = json.load(f)
+
+        data = _normalize_transform_data(raw_data)
+        mode_data = data.get(mode, {}) if isinstance(data, dict) else {}
+
+        for key in camera_keys:
+            key_str = str(key)
+            if key_str in mode_data:
+                entry = mode_data[key_str]
+            elif key in mode_data:
+                entry = mode_data[key]
+            else:
+                entry = None
+
+            if entry is None:
+                saved_transform[key] = None
+                continue
+
+            saved_transform[key] = {
+                'inner_corners': np.array(entry['inner_corners'], dtype=np.float32),
+                'board_size': entry['board_size'],
+                'square_size': entry['square_size'],
+                'rvec': np.array(entry['rvec']),
+                'tvec': np.array(entry['tvec']),
+                'use_white_side': entry.get(
+                    'use_white_side',
+                    camera_lookup[key].get('use_white_side', False)
+                )
+            }
         print("Loaded saved transforms from file")
     except Exception as e:
         print(f"Error loading transform data: {e}")
-        saved_transform = {WHITE_SIDE_CAMERA: None, BLACK_SIDE_CAMERA: None}
+        saved_transform = {key: None for key in camera_keys}
+
+
+class OpenCVCameraSource:
+    """Wrapper around ``cv2.VideoCapture`` that provides a consistent interface."""
+
+    def __init__(self, camera_index):
+        self.camera_index = camera_index
+        self.cap = None
+
+    def open(self):
+        if self.cap is not None:
+            self.cap.release()
+        self.cap = cv2.VideoCapture(self.camera_index)
+        if self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        return self.cap.isOpened()
+
+    def ensure_ready(self):
+        if self.cap is None or not self.cap.isOpened():
+            return self.open()
+        return True
+
+    def read(self):
+        if not self.ensure_ready():
+            return False, None
+        return self.cap.read()
+
+    def release(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+    def is_opened(self):
+        return self.cap is not None and self.cap.isOpened()
+
+
+class IsaacSimCameraSource:
+    """Camera interface for Isaac Sim RGB sensors."""
+
+    def __init__(self, prim_path):
+        self.prim_path = prim_path
+        try:
+            from omni.isaac.sensor import Camera  # pylint: disable=import-error
+        except ImportError as exc:
+            raise RuntimeError(
+                "Isaac Sim camera support requires running inside an Isaac Sim Python environment."
+            ) from exc
+
+        self._camera = Camera(prim_path=prim_path)
+        self._camera.initialize()
+
+    def ensure_ready(self):
+        return True
+
+    def is_opened(self):
+        return True
+
+    def read(self):
+        rgba = self._camera.get_rgba()
+        if rgba is None:
+            return False, None
+
+        frame = np.array(rgba)
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+
+        if frame.shape[-1] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        else:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+        return True, frame
+
+    def release(self):
+        # Isaac Sim cameras do not require explicit release operations.
+        return
 
 def find_chessboard_corners(img, use_white_side=True):
     """
@@ -317,6 +438,7 @@ def highlight_chess_move(
     show_axes=False,
     board=None,
     piece_models=None,
+    undistort=True,          # <--- NEW
 ):
     """
     Highlights chess moves on a perspective view of a chess board.
@@ -336,8 +458,16 @@ def highlight_chess_move(
             meshes for each piece. White pieces are shown in blue and black
             pieces in red.
     """
-    # First undistort the image
-    img = cv2.undistort(img, camera_matrix, dist_coeffs)
+    # First undistort the image (only if requested and there is nonzero distortion)
+    if undistort and np.any(np.abs(dist_coeffs) > 1e-6):
+        img = cv2.undistort(img, camera_matrix, dist_coeffs)
+        # Keep points consistent with the undistorted image:
+        inner_corners = cv2.undistortPoints(
+            inner_corners.reshape(-1, 1, 2),
+            camera_matrix,
+            dist_coeffs,
+            P=camera_matrix,
+        ).reshape(-1, 2).astype(np.float32)
     
     rvec, tvec = pose
           
@@ -410,141 +540,209 @@ def highlight_chess_move(
 
 
 
-def save_board_transform(camera_id, inner_corners, board_size, square_size, pose):
+def save_board_transform(camera_id, inner_corners, board_size, square_size, pose, mode, use_white_side):
     """
     Save the board transform data to a JSON file for both cameras
     """
     rvec, tvec = pose
-    
+
     # Load existing transforms if any
     try:
-        with open('board_transform.json', 'r') as f:
+        with open(BOARD_TRANSFORM_PATH, 'r') as f:
             transform_data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         transform_data = {}
-    
+
+    transform_data = _normalize_transform_data(transform_data)
+
+    mode_data = transform_data.setdefault(mode, {})
+
     # Update transform for current camera
-    transform_data[str(camera_id)] = {
+    mode_data[str(camera_id)] = {
         'inner_corners': inner_corners.tolist(),
         'board_size': int(board_size),
         'square_size': int(square_size),
         'rvec': rvec.tolist(),
         'tvec': tvec.tolist(),
+        'use_white_side': bool(use_white_side),
         'timestamp': datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     }
-    
+
     # Save updated transforms
-    with open('board_transform.json', 'w') as f:
+    with open(BOARD_TRANSFORM_PATH, 'w') as f:
         json.dump(transform_data, f, indent=4)
-    
-    print(f"Board transform saved for camera {camera_id}")
+
+    print(f"Board transform saved for camera {camera_id} in {mode} mode")
 
 # Example usage with images
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Chess vision board highlighter")
+    parser.add_argument(
+        "--mode",
+        choices=[REAL_MODE, SIM_MODE],
+        default=REAL_MODE,
+        help="Select 'real' for physical cameras or 'sim' for Isaac Sim sensors.",
+    )
+    args = parser.parse_args()
+
+    mode = args.mode
+
+    try:
+        if mode == SIM_MODE:
+            camera_configs = {
+                'white': {
+                    'label': 'white',
+                    'source': IsaacSimCameraSource(SIM_WHITE_CAMERA),
+                    'transform_key': SIM_WHITE_CAMERA,
+                    'use_white_side': True,
+                },
+                'black': {
+                    'label': 'black',
+                    'source': IsaacSimCameraSource(SIM_BLACK_CAMERA),
+                    'transform_key': SIM_BLACK_CAMERA,
+                    'use_white_side': False,
+                },
+            }
+        else:
+            camera_configs = {
+                'white': {
+                    'label': 'white',
+                    'source': OpenCVCameraSource(REAL_WHITE_CAMERA),
+                    'transform_key': str(REAL_WHITE_CAMERA),
+                    'use_white_side': True,
+                },
+                'black': {
+                    'label': 'black',
+                    'source': OpenCVCameraSource(REAL_BLACK_CAMERA),
+                    'transform_key': str(REAL_BLACK_CAMERA),
+                    'use_white_side': False,
+                },
+            }
+    except RuntimeError as exc:
+        print(exc)
+        exit(1)
+
+    transform_lookup = {
+        config['transform_key']: config for config in camera_configs.values()
+    }
+
+    current_camera_key = 'white'
+    cap = camera_configs[current_camera_key]['source']
+    if not cap.ensure_ready():
+        print(f"Could not open {camera_configs[current_camera_key]['label']} camera in {mode} mode!")
+        exit(1)
+
+    print("Camera opened successfully! Press 'q' to quit, 'c' to switch cameras...")
+
+    load_saved_transform(mode, transform_lookup)
+
     # Initialize variables for storing latest board detection
     latest_corners = None
     latest_board_size = None
     latest_square_size = None
     latest_pose = None
 
-    # Initialize with white side camera
-    current_camera = WHITE_SIDE_CAMERA
-    cap = cv2.VideoCapture(current_camera)
-    if not cap.isOpened():
-        print(f"Could not open camera {current_camera}!")
-        exit(1)
-
-    # Set camera properties
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    
-    print("Camera opened successfully! Press 'q' to quit, 'c' to switch cameras...")
-    
-    # Load the saved transforms at startup
-    load_saved_transform()
-    
     move = "e2e4"  # Example move
-    
+
     while True:
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame")
             break
-            
+
+        transform_key = camera_configs[current_camera_key]['transform_key']
+        use_white_side = camera_configs[current_camera_key]['use_white_side']
+
         try:
-            use_white_side = (current_camera == WHITE_SIDE_CAMERA)
-            
             try:
                 # Try to detect the board and store the results
                 latest_corners, latest_board_size, latest_square_size, latest_pose = \
                     find_chessboard_corners(frame, use_white_side)
-                
+
                 # Use the latest detection for highlighting
-                result = highlight_chess_move(frame, move, latest_corners, 
-                                           latest_board_size, latest_square_size, latest_pose)
-                
-            except Exception as e:
+                result = highlight_chess_move(
+                    frame,
+                    move,
+                    latest_corners,
+                    latest_board_size,
+                    latest_square_size,
+                    latest_pose,
+                )
+
+            except Exception:
                 # If detection fails, try using saved transform
-                if saved_transform is None or saved_transform[current_camera] is None:
+                if saved_transform is None or saved_transform.get(transform_key) is None:
                     raise ValueError("No valid transform available")
-                    
-                camera_transform = saved_transform[current_camera]
-                result = highlight_chess_move(frame, move,
-                                           camera_transform['inner_corners'],
-                                           camera_transform['board_size'],
-                                           camera_transform['square_size'],
-                                           (camera_transform['rvec'], camera_transform['tvec']))
-            
+
+                camera_transform = saved_transform[transform_key]
+                result = highlight_chess_move(
+                    frame,
+                    move,
+                    camera_transform['inner_corners'],
+                    camera_transform['board_size'],
+                    camera_transform['square_size'],
+                    (camera_transform['rvec'], camera_transform['tvec'])
+                )
+
             cv2.imshow("Chess Move Highlight", result)
-            
-        except Exception as e:
-            cv2.putText(frame, "No valid transform available", 
-                      (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        except Exception:
+            cv2.putText(
+                frame,
+                "No valid transform available",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+            )
             cv2.imshow("Chess Move Highlight", frame)
-        
+
         # Handle keyboard input
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
         elif key == ord('c'):
             # Switch cameras
-            new_camera = BLACK_SIDE_CAMERA if current_camera == WHITE_SIDE_CAMERA else WHITE_SIDE_CAMERA
-            new_cap = cv2.VideoCapture(new_camera)
-            
-            if new_cap.isOpened():
-                # Close the old camera
-                cap.release()
-                
-                # Set up the new camera
+            cap.release()
+            new_camera_key = 'black' if current_camera_key == 'white' else 'white'
+            new_cap = camera_configs[new_camera_key]['source']
+
+            if new_cap.ensure_ready():
                 cap = new_cap
-                current_camera = new_camera
-                
+                current_camera_key = new_camera_key
+
                 # Reset latest detection
                 latest_corners = None
                 latest_board_size = None
                 latest_square_size = None
                 latest_pose = None
-                
-                # Set camera properties
-                cap.set(cv2.CAP_PROP_FPS, 30)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                
-                print(f"Switched to {'black' if current_camera == BLACK_SIDE_CAMERA else 'white'} side camera")
+
+                print(f"Switched to {camera_configs[current_camera_key]['label']} side camera")
             else:
-                print(f"Failed to open camera {new_camera}")
-                new_cap.release()
-                
+                print(f"Failed to open {camera_configs[new_camera_key]['label']} camera")
+                cap = camera_configs[current_camera_key]['source']
+                cap.ensure_ready()
+
         elif key == ord('s'):
             if latest_corners is not None:
-                save_board_transform(current_camera, latest_corners, latest_board_size, 
-                                  latest_square_size, latest_pose)
+                save_board_transform(
+                    transform_key,
+                    latest_corners,
+                    latest_board_size,
+                    latest_square_size,
+                    latest_pose,
+                    mode,
+                    camera_configs[current_camera_key]['use_white_side'],
+                )
                 # Update the stored transform after saving
-                load_saved_transform()
-                print(f"Transform saved for camera {current_camera}")
+                load_saved_transform(mode, transform_lookup)
+                print(
+                    "Transform saved for "
+                    f"{camera_configs[current_camera_key]['label']} camera ({transform_key})"
+                )
             else:
                 print("No valid board detection to save!")
-    
+
     cap.release()
     cv2.destroyAllWindows()

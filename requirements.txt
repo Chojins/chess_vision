@@ -1,0 +1,11 @@
+# chess_vision requirements for Isaac Sim Python
+numpy==1.26.4
+opencv-python==4.10.0.84
+python-chess==1.999
+pyrender==0.1.45
+pyvirtualcam==0.14.0
+cairosvg==2.8.2
+PyOpenGL==3.1.0
+pyglet==2.1.8
+
+
