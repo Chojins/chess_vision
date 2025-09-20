@@ -438,6 +438,7 @@ def highlight_chess_move(
     show_axes=False,
     board=None,
     piece_models=None,
+    undistort=True,          # <--- NEW
 ):
     """
     Highlights chess moves on a perspective view of a chess board.
@@ -457,8 +458,16 @@ def highlight_chess_move(
             meshes for each piece. White pieces are shown in blue and black
             pieces in red.
     """
-    # First undistort the image
-    img = cv2.undistort(img, camera_matrix, dist_coeffs)
+    # First undistort the image (only if requested and there is nonzero distortion)
+    if undistort and np.any(np.abs(dist_coeffs) > 1e-6):
+        img = cv2.undistort(img, camera_matrix, dist_coeffs)
+        # Keep points consistent with the undistorted image:
+        inner_corners = cv2.undistortPoints(
+            inner_corners.reshape(-1, 1, 2),
+            camera_matrix,
+            dist_coeffs,
+            P=camera_matrix,
+        ).reshape(-1, 2).astype(np.float32)
     
     rvec, tvec = pose
           
